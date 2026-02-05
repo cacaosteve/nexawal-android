@@ -1,0 +1,3 @@
+ninja: Entering directory `/Users/steve/supermegamartandwalletcore/nexawal-android/walletcore/.cxx/Debug/3c6x4d5t/arm64-v8a'
+[1/2] Building CXX object CMakeFiles/walletcore_jni.dir/walletcore_jni.cpp.o
+[2/2] Linking CXX shared library /Users/steve/supermegamartandwalletcore/nexawal-android/walletcore/build/intermediates/cxx/Debug/3c6x4d5t/obj/arm64-v8a/libwalletcore_jni.so

@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths xmlns:android="http://schemas.android.com/apk/res/android">
+    <!--
+      FileProvider paths for sharing generated QR images.
+
+      We write QR PNGs under:
+        context.cacheDir / "shares" / "monero_receive_qr.png"
+
+      This allows sharing via content:// URIs without exposing raw file:// paths.
+    -->
+    <cache-path
+        name="cache"
+        path="." />
+</paths>
