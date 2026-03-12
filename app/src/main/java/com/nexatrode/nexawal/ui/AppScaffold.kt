@@ -4,6 +4,7 @@ import android.content.Intent
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -13,6 +14,8 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -28,8 +31,10 @@ import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.ProgressIndicatorDefaults
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -40,9 +45,15 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.core.content.FileProvider
 import androidx.navigation.NavDestination.Companion.hierarchy
 import androidx.navigation.NavGraph.Companion.findStartDestination
@@ -50,12 +61,15 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
+import com.nexatrode.nexawal.MoneroConfig
 import com.nexatrode.nexawal.MoneroQr
 import com.nexatrode.nexawal.SendJson
 import com.nexatrode.nexawal.TimeFormat
 import com.nexatrode.nexawal.Transfer
 import com.nexatrode.nexawal.WalletManager
 import com.nexatrode.nexawal.XmrFormat
+import com.nexatrode.nexawal.walletcore.WalletCore
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.io.File
 import java.io.FileOutputStream
@@ -173,6 +187,36 @@ private fun WalletScreen(walletManager: WalletManager) {
     var errorText by remember { mutableStateOf<String?>(null) }
     var statusText by remember { mutableStateOf<String?>(null) }
 
+    // iOS-like incremental UI updates:
+    // While a refresh is running, periodically refresh balance/transfers so the UI updates
+    // without waiting for the refresh to fully complete.
+    //
+    // Tuning:
+    // - Balance is cheap to query; update frequently.
+    // - Transfers require JSON generation + parsing; update less frequently to reduce UI/jank.
+    LaunchedEffect(state.refreshInProgress, state.walletId) {
+        if (!state.refreshInProgress) return@LaunchedEffect
+        val walletId = state.walletId ?: return@LaunchedEffect
+
+        var lastTransfersRefreshAtMs = 0L
+        val balanceIntervalMs = 2_000L
+        val transfersIntervalMs = 8_000L
+
+        while (state.refreshInProgress) {
+            val now = System.currentTimeMillis()
+
+            // Best-effort: don't crash UI if these throw.
+            runCatching { walletManager.refreshBalanceSnapshot() }
+
+            if (now - lastTransfersRefreshAtMs >= transfersIntervalMs) {
+                runCatching { walletManager.refreshTransfersSnapshot() }
+                lastTransfersRefreshAtMs = now
+            }
+
+            delay(balanceIntervalMs)
+        }
+    }
+
     var selectedTransfer by remember { mutableStateOf<Transfer?>(null) }
     var showTransferDetails by remember { mutableStateOf(false) }
 
@@ -192,11 +236,80 @@ private fun WalletScreen(walletManager: WalletManager) {
     val chainHeight = st?.chainHeight ?: 0L
     val lastScanned = st?.lastScanned ?: 0L
     val restoreHeight = st?.restoreHeight ?: 0L
-    val remainingBlocks = (chainHeight - lastScanned).coerceAtLeast(0L)
-    val isSynced = chainHeight > 0L && lastScanned >= chainHeight
 
-    // Very rough progress; iOS has a more nuanced model but this mirrors the idea.
-    val progress = if (chainHeight <= 0L) 0f else (lastScanned.toDouble() / chainHeight.toDouble()).coerceIn(0.0, 1.0).toFloat()
+    // Synced display logic fix:
+    // The core initializes chainHeight to restoreHeight on open/import (before contacting the daemon),
+    // which can make the UI look "fully synced" with 0 XMR. Only claim synced once the tip/target
+    // is actually known.
+    //
+    // Prefer a stable target captured at refresh start; otherwise only treat chainHeight as usable
+    // if it is strictly greater than restoreHeight (meaning we have learned a real daemon height).
+    val tipKnown = chainHeight > restoreHeight
+    val targetHeight = when {
+        state.refreshTargetHeight != null -> state.refreshTargetHeight!!
+        tipKnown -> chainHeight
+        else -> 0L
+    }
+
+    val remainingBlocks = if (targetHeight > 0L) (targetHeight - lastScanned).coerceAtLeast(0L) else 0L
+    val isSynced = targetHeight > 0L && lastScanned >= targetHeight
+
+    // iOS parity: show scan tuning values (persisted) if available.
+    // These are populated by WalletManager at refresh start.
+    val accountGap = state.accountGap
+    val gapLimit = state.gapLimit
+
+    // iOS-like blocks/sec:
+    // - compute instantaneous rate from lastScanned deltas
+    // - smooth via exponential moving average (EMA) to avoid spiky UI
+    var lastRateSampleAtMs by remember { mutableStateOf(System.currentTimeMillis()) }
+    var lastRateSampleScanned by remember { mutableStateOf(lastScanned) }
+    var blocksPerSecInstant by remember { mutableStateOf(0.0) }
+    var blocksPerSecSmoothed by remember { mutableStateOf(0.0) }
+
+    LaunchedEffect(state.refreshInProgress, lastScanned) {
+        val now = System.currentTimeMillis()
+        val dtMs = (now - lastRateSampleAtMs).coerceAtLeast(1L)
+        val dScanned = (lastScanned - lastRateSampleScanned).coerceAtLeast(0L)
+
+        blocksPerSecInstant = (dScanned.toDouble() * 1000.0) / dtMs.toDouble()
+
+        // EMA smoothing:
+        // Higher alpha -> reacts faster; lower alpha -> smoother.
+        val alpha = 0.25
+        blocksPerSecSmoothed = if (blocksPerSecSmoothed <= 0.0) {
+            blocksPerSecInstant
+        } else {
+            (alpha * blocksPerSecInstant) + ((1.0 - alpha) * blocksPerSecSmoothed)
+        }
+
+        lastRateSampleAtMs = now
+        lastRateSampleScanned = lastScanned
+    }
+
+    // iOS-like theme-aware colors (approximate).
+    // We keep iOS "System Blue" consistent and vary backgrounds/secondary text with system theme.
+    val dark = isSystemInDarkTheme()
+    val iosBlue = Color(0xFF007AFF)
+
+    // iOS grouped background approximations:
+    // - light: #F2F2F7
+    // - dark:  near iOS system grouped background
+    val iosGroupedBg = if (dark) Color(0xFF000000) else Color(0xFFF2F2F7)
+    val iosCardBg = if (dark) Color(0xFF1C1C1E) else Color(0xFFFFFFFF)
+    val iosSecondary = if (dark) Color(0xFF8E8E93) else Color(0xFF6D6D72)
+    val iosSeparator = if (dark) Color(0xFF2C2C2E) else Color(0xFFE5E5EA)
+    val iosPrimaryText = if (dark) Color(0xFFFFFFFF) else Color(0xFF000000)
+
+    // Match iOS WalletView sizing:
+    // - Total: 36pt bold
+    // - Unlocked: 24pt semibold
+    val totalAmountSp = 36.sp
+    val unlockedAmountSp = 24.sp
+    val suffixSp = 14.sp
+
+    // Very rough progress; iOS uses a stable target height snapshot.
+    val progress = if (targetHeight <= 0L) 0f else (lastScanned.toDouble() / targetHeight.toDouble()).coerceIn(0.0, 1.0).toFloat()
 
     // Sort transfers like iOS: pending first, then height desc, then timestamp desc.
     val transfersSorted: List<Transfer> = remember(state.transfers) {
@@ -219,50 +332,104 @@ private fun WalletScreen(walletManager: WalletManager) {
     Column(
         modifier = Modifier
             .fillMaxSize()
+            .background(iosGroupedBg)
             .verticalScroll(scroll)
             .padding(16.dp)
     ) {
-        // Balance card (like iOS)
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .background(Color(0xFFF2F2F7))
-                .padding(16.dp)
+        // Balance card (iOS-like, theme-aware)
+        Surface(
+            modifier = Modifier.fillMaxWidth(),
+            color = iosCardBg,
+            shape = RoundedCornerShape(16.dp),
+            tonalElevation = 1.dp,
+            shadowElevation = 0.dp,
         ) {
-            Text("Total Balance", color = Color.Gray)
-            Spacer(Modifier.height(6.dp))
-            Text(
-                totalXmr,
-                fontFamily = FontFamily.Monospace
-            )
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(16.dp)
+            ) {
+                Text("Total Balance", color = iosSecondary)
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    buildAnnotatedString {
+                        withStyle(
+                            SpanStyle(
+                                fontFamily = FontFamily.Monospace,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = totalAmountSp,
+                                color = iosPrimaryText
+                            )
+                        ) {
+                            append(totalXmr)
+                        }
+                        withStyle(
+                            SpanStyle(
+                                fontFamily = FontFamily.Monospace,
+                                fontWeight = FontWeight.Normal,
+                                fontSize = suffixSp,
+                                color = iosSecondary
+                            )
+                        ) {
+                            append(" XMR")
+                        }
+                    }
+                )
 
-            Spacer(Modifier.height(12.dp))
+                Spacer(Modifier.height(14.dp))
 
-            Text("Unlocked Balance", color = Color.Gray)
-            Spacer(Modifier.height(6.dp))
-            Text(
-                unlockedXmr,
-                fontFamily = FontFamily.Monospace,
-                color = Color(0xFF007AFF)
-            )
+                Text("Unlocked Balance", color = iosSecondary)
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    buildAnnotatedString {
+                        withStyle(
+                            SpanStyle(
+                                fontFamily = FontFamily.Monospace,
+                                fontWeight = FontWeight.SemiBold,
+                                fontSize = unlockedAmountSp,
+                                color = iosBlue
+                            )
+                        ) {
+                            append(unlockedXmr)
+                        }
+                        withStyle(
+                            SpanStyle(
+                                fontFamily = FontFamily.Monospace,
+                                fontWeight = FontWeight.Normal,
+                                fontSize = suffixSp,
+                                color = iosSecondary
+                            )
+                        ) {
+                            append(" XMR")
+                        }
+                    }
+                )
+            }
         }
 
         Spacer(Modifier.height(16.dp))
 
-        // Address card (like iOS)
-        Text("Wallet Address")
+        // Address card (iOS-like, theme-aware)
+        Text("Wallet Address", color = iosSecondary)
         Spacer(Modifier.height(6.dp))
-        SelectionContainer {
-            Text(
-                walletAddress,
-                fontFamily = FontFamily.Monospace,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(Color(0xFFF2F2F7))
-                    .padding(12.dp),
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis
-            )
+        Surface(
+            modifier = Modifier.fillMaxWidth(),
+            color = iosCardBg,
+            shape = RoundedCornerShape(8.dp),
+            tonalElevation = 1.dp,
+            shadowElevation = 0.dp,
+        ) {
+            SelectionContainer {
+                Text(
+                    walletAddress,
+                    fontFamily = FontFamily.Monospace,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(12.dp),
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
         }
 
         Spacer(Modifier.height(8.dp))
@@ -286,30 +453,55 @@ private fun WalletScreen(walletManager: WalletManager) {
 
         Spacer(Modifier.height(16.dp))
 
-        // Sync Status
-        Text("Sync Status", color = Color.Gray)
-        Spacer(Modifier.height(8.dp))
-
-        KeyValueRow("Chain Height", chainHeight.toString())
-        KeyValueRow("Last Scanned", lastScanned.toString())
-        if (!isSynced) {
-            KeyValueRow("Remaining Blocks", remainingBlocks.toString())
-        }
-        KeyValueRow("Target Height", chainHeight.toString())
-        KeyValueRow("Restore Height", restoreHeight.toString())
-
-        Spacer(Modifier.height(8.dp))
-
-        LinearProgressIndicator(
-            progress = { progress },
-            modifier = Modifier.fillMaxWidth(),
-            color = ProgressIndicatorDefaults.linearColor,
+        // Sync Status (iOS-like, theme-aware)
+        Text(
+            "Sync Status",
+            color = iosSecondary,
         )
+        Spacer(Modifier.height(8.dp))
+
+        Surface(
+            modifier = Modifier.fillMaxWidth(),
+            color = iosCardBg,
+            shape = RoundedCornerShape(14.dp),
+            tonalElevation = 1.dp,
+            shadowElevation = 0.dp,
+        ) {
+            Column(modifier = Modifier.padding(12.dp)) {
+                KeyValueRow("Chain Height", chainHeight.toString(), labelColor = iosSecondary, valueColor = iosPrimaryText)
+                KeyValueRow("Last Scanned", lastScanned.toString(), labelColor = iosSecondary, valueColor = iosPrimaryText)
+                if (!isSynced) {
+                    KeyValueRow("Remaining Blocks", remainingBlocks.toString(), labelColor = iosSecondary, valueColor = iosPrimaryText)
+                }
+                KeyValueRow("Target Height", targetHeight.toString(), labelColor = iosSecondary, valueColor = iosPrimaryText)
+                KeyValueRow("Restore Height", restoreHeight.toString(), labelColor = iosSecondary, valueColor = iosPrimaryText)
+
+                // iOS parity rows (MoneroConfig.accountGap / MoneroConfig.gapLimit)
+                if (accountGap != null) {
+                    KeyValueRow("Accounts (lookahead)", accountGap.toString(), labelColor = iosSecondary, valueColor = iosPrimaryText)
+                }
+                if (gapLimit != null) {
+                    KeyValueRow("Gap limit", gapLimit.toString(), labelColor = iosSecondary, valueColor = iosPrimaryText)
+                }
+
+                KeyValueRow("Throughput", String.format("%.1f blk/s", blocksPerSecSmoothed), labelColor = iosSecondary, valueColor = iosPrimaryText)
+
+                Spacer(Modifier.height(10.dp))
+
+                LinearProgressIndicator(
+                    progress = { progress },
+                    modifier = Modifier.fillMaxWidth(),
+                    color = iosBlue,
+                    trackColor = iosSeparator,
+                )
+            }
+        }
         Spacer(Modifier.height(6.dp))
         Text(
             if (isSynced) "Wallet is fully synced"
-            else if (chainHeight == 0L || lastScanned == restoreHeight) "Initializing scan…"
-            else "Syncing… $remainingBlocks blocks remaining",
+            else if (targetHeight == 0L) "Initializing scan…"
+            else if (lastScanned == restoreHeight) "Initializing scan…"
+            else "Syncing… $remainingBlocks blocks remaining @ ${String.format("%.1f", blocksPerSecSmoothed)} blks/s",
             color = Color.Gray
         )
 
@@ -562,10 +754,23 @@ private fun WalletScreen(walletManager: WalletManager) {
 }
 
 @Composable
-private fun KeyValueRow(label: String, value: String) {
+private fun KeyValueRow(
+    label: String,
+    value: String,
+    labelColor: Color = Color.Gray,
+    valueColor: Color = Color.Unspecified,
+) {
     Row(modifier = Modifier.fillMaxWidth()) {
-        Text(label, modifier = Modifier.weight(1f))
-        Text(value, fontFamily = FontFamily.Monospace)
+        Text(
+            label,
+            modifier = Modifier.weight(1f),
+            color = labelColor
+        )
+        Text(
+            value,
+            fontFamily = FontFamily.Monospace,
+            color = valueColor
+        )
     }
 }
 
@@ -854,11 +1059,32 @@ private fun SendScreen(walletManager: WalletManager) {
 private fun SettingsScreen(walletManager: WalletManager) {
     val scope = rememberCoroutineScope()
     val state by walletManager.state.collectAsState()
+    val context = LocalContext.current
 
     var nodeUrlInput by remember {
         mutableStateOf(state.nodeUrl ?: walletManager.defaultNodeUrl())
     }
+
+    // Persisted scan tuning (iOS parity)
+    var gapLimitInput by remember {
+        mutableStateOf(MoneroConfig.gapLimit(context).toString())
+    }
+    var accountGapInput by remember {
+        mutableStateOf(MoneroConfig.accountGap(context).toString())
+    }
+
+    // Validation state (keep messages close to the inputs).
+    var gapLimitError by remember { mutableStateOf<String?>(null) }
+    var accountGapError by remember { mutableStateOf<String?>(null) }
+
     var statusText by remember { mutableStateOf<String?>(null) }
+
+    // Debug snapshot (best-effort, for parity troubleshooting).
+    val sync = state.syncStatus
+    val cacheInfo = state.cacheInfo
+    val coreErr = runCatching { WalletCore.lastErrorMessage() }.getOrNull()
+    val derivedAddr = state.walletAddress
+    val tipKnown = sync != null && sync.chainHeight > sync.restoreHeight
 
     Column(modifier = Modifier.padding(16.dp)) {
         Text("Settings")
@@ -889,20 +1115,177 @@ private fun SettingsScreen(walletManager: WalletManager) {
             },
             modifier = Modifier.fillMaxWidth()
         ) {
-            Text("Save")
+            Text("Save node URL")
         }
 
         Spacer(Modifier.height(8.dp))
 
         Text("Current node: ${state.nodeUrl ?: walletManager.defaultNodeUrl()}")
 
+        Spacer(Modifier.height(16.dp))
+
+        Text("Scan tuning (iOS parity)", color = Color.Gray)
+        Spacer(Modifier.height(8.dp))
+
+        Text("Gap limit (subaddresses per account)")
+        OutlinedTextField(
+            value = gapLimitInput,
+            onValueChange = {
+                gapLimitInput = it
+                gapLimitError = null
+                statusText = null
+            },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth(),
+            isError = gapLimitError != null,
+            keyboardOptions = KeyboardOptions.Default.copy(keyboardType = KeyboardType.Number),
+            placeholder = { Text(MoneroConfig.DEFAULT_GAP_LIMIT.toString()) }
+        )
+        Text(
+            gapLimitError ?: "Valid range: 1..100000 (default ${MoneroConfig.DEFAULT_GAP_LIMIT})",
+            color = if (gapLimitError != null) Color(0xFFFF3B30) else Color.Gray
+        )
+
+        Spacer(Modifier.height(8.dp))
+
+        Text("Accounts (lookahead)")
+        OutlinedTextField(
+            value = accountGapInput,
+            onValueChange = {
+                accountGapInput = it
+                accountGapError = null
+                statusText = null
+            },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth(),
+            isError = accountGapError != null,
+            keyboardOptions = KeyboardOptions.Default.copy(keyboardType = KeyboardType.Number),
+            placeholder = { Text(MoneroConfig.DEFAULT_ACCOUNT_GAP.toString()) }
+        )
+        Text(
+            accountGapError ?: "Valid range: 1..1000 (default ${MoneroConfig.DEFAULT_ACCOUNT_GAP})",
+            color = if (accountGapError != null) Color(0xFFFF3B30) else Color.Gray
+        )
+
+        Spacer(Modifier.height(8.dp))
+
+        Button(
+            onClick = {
+                statusText = null
+                gapLimitError = null
+                accountGapError = null
+
+                scope.launch {
+                    try {
+                        val glRaw = gapLimitInput.trim().toIntOrNull()
+                        val agRaw = accountGapInput.trim().toIntOrNull()
+
+                        if (glRaw == null) {
+                            gapLimitError = "Enter a whole number"
+                            return@launch
+                        }
+                        if (agRaw == null) {
+                            accountGapError = "Enter a whole number"
+                            return@launch
+                        }
+
+                        // Clamp exactly like MoneroConfig does (iOS parity).
+                        val glClamped = glRaw.coerceIn(1, 100_000)
+                        val agClamped = agRaw.coerceIn(1, 1_000)
+
+                        // If we had to clamp, update the text fields so the UI reflects what we saved.
+                        if (glClamped != glRaw) gapLimitInput = glClamped.toString()
+                        if (agClamped != agRaw) accountGapInput = agClamped.toString()
+
+                        MoneroConfig.setGapLimit(context, glClamped)
+                        MoneroConfig.setAccountGap(context, agClamped)
+
+                        // Best-effort: apply immediately if a wallet is open.
+                        // Refresh will also re-apply at start.
+                        val wid = state.walletId
+                        if (!wid.isNullOrBlank()) {
+                            runCatching { WalletCore.setGapLimit(wid, MoneroConfig.gapLimit(context)) }
+                            runCatching { WalletCore.setAccountGap(MoneroConfig.accountGap(context)) }
+                        }
+
+                        statusText = "Saved scan tuning"
+                    } catch (t: Throwable) {
+                        statusText = "Failed to save scan tuning: ${t.message ?: t.javaClass.simpleName}"
+                    }
+                }
+            },
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text("Save scan tuning")
+        }
+
+        Spacer(Modifier.height(8.dp))
+
+        Text(
+            "Effective gapLimit=${MoneroConfig.gapLimit(context)} accountGap=${MoneroConfig.accountGap(context)}",
+            color = Color.Gray
+        )
+
         statusText?.let {
             Spacer(Modifier.height(8.dp))
             Text(it)
         }
 
-        Spacer(Modifier.height(12.dp))
-        Text("TODO: gap/account gap + network policy (mainnet-only now)")
+        Spacer(Modifier.height(16.dp))
+
+        Text("Debug", color = Color.Gray)
+        Spacer(Modifier.height(8.dp))
+
+        // Derived primary address (parity troubleshooting).
+        Text("Derived address", color = Color.Gray)
+        SelectionContainer {
+            Text(
+                derivedAddr ?: "(none)",
+                fontFamily = FontFamily.Monospace,
+            )
+        }
+
+        Spacer(Modifier.height(8.dp))
+
+        Button(
+            onClick = {
+                statusText = null
+                walletManager.recomputeDerivedAddressFromStoredMetadata()
+                statusText = "Requested address recompute"
+            },
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text("Recompute derived address")
+        }
+
+        Spacer(Modifier.height(8.dp))
+
+        // Sync status snapshot
+        Text("Sync status", color = Color.Gray)
+        Text(
+            "chainHeight=${sync?.chainHeight ?: 0} lastScanned=${sync?.lastScanned ?: 0} restoreHeight=${sync?.restoreHeight ?: 0} tipKnown=$tipKnown",
+            fontFamily = FontFamily.Monospace
+        )
+
+        Spacer(Modifier.height(8.dp))
+
+        // Cache info snapshot
+        Text("Cache", color = Color.Gray)
+        Text(
+            "path=${cacheInfo?.filePath ?: "(none)"} bytes=${cacheInfo?.bytesOnDisk ?: 0} savedAtMs=${cacheInfo?.lastSavedAtMs ?: 0}",
+            fontFamily = FontFamily.Monospace
+        )
+
+        Spacer(Modifier.height(8.dp))
+
+        // Core error state
+        Text("Core last error", color = Color.Gray)
+        SelectionContainer {
+            Text(
+                coreErr ?: "<null>",
+                fontFamily = FontFamily.Monospace
+            )
+        }
     }
 }
 

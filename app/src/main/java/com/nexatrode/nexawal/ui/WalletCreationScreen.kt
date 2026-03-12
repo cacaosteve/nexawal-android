@@ -142,8 +142,21 @@ fun WalletCreationScreen(
                     replaceExisting = replaceExisting,
                 )
 
-                // iOS parity: after create/import, immediately start a refresh.
-                walletManager.refreshWallet()
+                // iOS parity: after create/import, start refresh immediately BUT do not await it here.
+                // If we await, the creation/import screen stays "busy" and the user doesn't transition
+                // to the main wallet UI promptly.
+                scope.launch {
+                    runCatching {
+                        walletManager.refreshWallet()
+                        walletManager.refreshWalletDataSnapshots()
+                    }.onFailure { t ->
+                        // Best-effort: don't fail wallet creation/import just because refresh failed.
+                        // Surface the error in the manager state and logcat.
+                        // (WalletManager already samples core lastError periodically.)
+                        // We keep this light to avoid UI disruption.
+                        errorText.value = t.message ?: t.javaClass.simpleName
+                    }
+                }
 
                 // After importing/replacing, refresh persisted-wallet flag
                 hasStoredWallet.value = runCatching { walletManager.hasStoredWallet() }.getOrNull()
