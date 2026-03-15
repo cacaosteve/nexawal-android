@@ -38,6 +38,15 @@ object WalletCore {
     fun version(): String = WalletCoreJni.version()
 
     /**
+     * Generate a new English Monero mnemonic (25 words).
+     *
+     * Mirrors the C ABI:
+     *   int32_t wallet_generate_mnemonic_english(...)
+     */
+    @JvmStatic
+    fun generateMnemonicEnglish(): String = WalletCoreJni.generateMnemonicEnglish()
+
+    /**
      * Returns the last error message recorded by the core, if any.
      *
      * Mirrors the C ABI:
@@ -71,6 +80,30 @@ object WalletCore {
     ): String {
         require(mnemonic.isNotBlank()) { "mnemonic must not be blank" }
         return WalletCoreJni.primaryAddressFromMnemonic(mnemonic.trim(), mainnet)
+    }
+
+    /**
+     * Derive a subaddress from a 25-word mnemonic.
+     *
+     * Mirrors the C ABI:
+     *   int32_t wallet_derive_subaddress_from_mnemonic(...)
+     */
+    @JvmStatic
+    fun deriveSubaddressFromMnemonic(
+        mnemonic: String,
+        accountIndex: Int = 0,
+        subaddressIndex: Int,
+        mainnet: Boolean = true,
+    ): String {
+        require(mnemonic.isNotBlank()) { "mnemonic must not be blank" }
+        require(accountIndex >= 0) { "accountIndex must be >= 0" }
+        require(subaddressIndex >= 0) { "subaddressIndex must be >= 0" }
+        return WalletCoreJni.subaddressFromMnemonic(
+            mnemonic.trim(),
+            accountIndex,
+            subaddressIndex,
+            mainnet
+        )
     }
 
     /**
@@ -119,6 +152,43 @@ object WalletCore {
     fun refreshAsync(walletId: String, nodeUrl: String? = null) {
         require(walletId.isNotBlank()) { "walletId must not be blank" }
         WalletCoreJni.refreshAsync(walletId, nodeUrl)
+    }
+
+    /**
+     * Set the registered subaddress gap limit for scanning (minimum 1).
+     *
+     * Mirrors the C ABI:
+     *   int32_t wallet_set_gap_limit(const char* wallet_id, uint32_t gap_limit)
+     */
+    @JvmStatic
+    fun setGapLimit(walletId: String, gapLimit: Int) {
+        require(walletId.isNotBlank()) { "walletId must not be blank" }
+        require(gapLimit >= 1) { "gapLimit must be >= 1" }
+        WalletCoreJni.setGapLimit(walletId, gapLimit)
+    }
+
+    /**
+     * Best-effort: set an environment variable in the native process.
+     *
+     * This is used for iOS parity with `MoneroConfig.scanNodeURL()`, which sets:
+     * - WALLETCORE_ACCOUNT_GAP
+     */
+    @JvmStatic
+    fun setEnv(key: String, value: String) {
+        require(key.isNotBlank()) { "key must not be blank" }
+        WalletCoreJni.setEnv(key.trim(), value)
+    }
+
+    /**
+     * Convenience helper for iOS parity: set account lookahead.
+     *
+     * The core reads this in refresh via:
+     *   WALLETCORE_ACCOUNT_GAP
+     */
+    @JvmStatic
+    fun setAccountGap(accountGap: Int) {
+        require(accountGap >= 1) { "accountGap must be >= 1" }
+        setEnv("WALLETCORE_ACCOUNT_GAP", accountGap.toString())
     }
 
     /**
@@ -190,6 +260,23 @@ object WalletCore {
         require(walletId.isNotBlank()) { "walletId must not be blank" }
         val a = WalletCoreJni.getBalance(walletId)
         require(a.size == 2) { "getBalance returned unexpected array size: ${a.size}" }
+        return Balance(
+            totalPiconero = a[0],
+            unlockedPiconero = a[1],
+        )
+    }
+
+    /**
+     * Get balances (piconero) for the wallet constrained by an optional input filter.
+     *
+     * Mirrors the C ABI:
+     *   int32_t wallet_get_balance_with_filter(...)
+     */
+    @JvmStatic
+    fun getBalanceWithFilter(walletId: String, filterJson: String? = null): Balance {
+        require(walletId.isNotBlank()) { "walletId must not be blank" }
+        val a = WalletCoreJni.getBalanceWithFilter(walletId, filterJson)
+        require(a.size == 2) { "getBalanceWithFilter returned unexpected array size: ${a.size}" }
         return Balance(
             totalPiconero = a[0],
             unlockedPiconero = a[1],
@@ -276,6 +363,20 @@ object WalletCore {
     }
 
     @JvmStatic
+    fun previewFeeJsonWithFilter(
+        walletId: String,
+        destinationsJson: String,
+        filterJson: String? = null,
+        ringLen: Int = 16,
+        nodeUrl: String? = null,
+    ): String {
+        require(walletId.isNotBlank()) { "walletId must not be blank" }
+        require(destinationsJson.isNotBlank()) { "destinationsJson must not be blank" }
+        require(ringLen in 1..255) { "ringLen must be 1..255" }
+        return WalletCoreJni.previewFeeWithFilter(walletId, nodeUrl, destinationsJson, filterJson, ringLen)
+    }
+
+    @JvmStatic
     fun sendJson(
         walletId: String,
         toAddress: String,
@@ -288,6 +389,20 @@ object WalletCore {
         require(amountPiconero > 0) { "amountPiconero must be > 0" }
         require(ringLen in 1..255) { "ringLen must be 1..255" }
         return WalletCoreJni.send(walletId, nodeUrl, toAddress, amountPiconero, ringLen)
+    }
+
+    @JvmStatic
+    fun sendJsonWithFilter(
+        walletId: String,
+        destinationsJson: String,
+        filterJson: String? = null,
+        ringLen: Int = 16,
+        nodeUrl: String? = null,
+    ): String {
+        require(walletId.isNotBlank()) { "walletId must not be blank" }
+        require(destinationsJson.isNotBlank()) { "destinationsJson must not be blank" }
+        require(ringLen in 1..255) { "ringLen must be 1..255" }
+        return WalletCoreJni.sendWithFilter(walletId, nodeUrl, destinationsJson, filterJson, ringLen)
     }
 
     @JvmStatic
@@ -304,6 +419,20 @@ object WalletCore {
     }
 
     @JvmStatic
+    fun previewSweepJsonWithFilter(
+        walletId: String,
+        toAddress: String,
+        filterJson: String? = null,
+        ringLen: Int = 16,
+        nodeUrl: String? = null,
+    ): String {
+        require(walletId.isNotBlank()) { "walletId must not be blank" }
+        require(toAddress.isNotBlank()) { "toAddress must not be blank" }
+        require(ringLen in 1..255) { "ringLen must be 1..255" }
+        return WalletCoreJni.previewSweepWithFilter(walletId, nodeUrl, toAddress, filterJson, ringLen)
+    }
+
+    @JvmStatic
     fun sweepJson(
         walletId: String,
         toAddress: String,
@@ -315,6 +444,47 @@ object WalletCore {
         require(ringLen in 1..255) { "ringLen must be 1..255" }
         return WalletCoreJni.sweep(walletId, nodeUrl, toAddress, ringLen)
     }
+
+    @JvmStatic
+    fun sweepJsonWithFilter(
+        walletId: String,
+        toAddress: String,
+        filterJson: String? = null,
+        ringLen: Int = 16,
+        nodeUrl: String? = null,
+    ): String {
+        require(walletId.isNotBlank()) { "walletId must not be blank" }
+        require(toAddress.isNotBlank()) { "toAddress must not be blank" }
+        require(ringLen in 1..255) { "ringLen must be 1..255" }
+        return WalletCoreJni.sweepWithFilter(walletId, nodeUrl, toAddress, filterJson, ringLen)
+    }
+
+    @JvmStatic
+    fun forceRescanFromHeight(walletId: String, fromHeight: Long) {
+        require(walletId.isNotBlank()) { "walletId must not be blank" }
+        require(fromHeight >= 0L) { "fromHeight must be >= 0" }
+        WalletCoreJni.forceRescanFromHeight(walletId, fromHeight)
+    }
+
+    @JvmStatic
+    fun resetTrackedOutputs(walletId: String) {
+        require(walletId.isNotBlank()) { "walletId must not be blank" }
+        WalletCoreJni.resetTrackedOutputs(walletId)
+    }
+
+    @JvmStatic
+    fun startZmqListener(endpoint: String) {
+        require(endpoint.isNotBlank()) { "endpoint must not be blank" }
+        WalletCoreJni.startZmqListener(endpoint)
+    }
+
+    @JvmStatic
+    fun stopZmqListener() {
+        WalletCoreJni.stopZmqListener()
+    }
+
+    @JvmStatic
+    fun zmqSequence(): Long = WalletCoreJni.zmqSequence()
 }
 
 /**
@@ -332,6 +502,7 @@ internal object WalletCoreJni {
     }
 
     external fun version(): String
+    external fun generateMnemonicEnglish(): String
 
     /**
      * Returns the last error message recorded by the core, if any.
@@ -346,6 +517,12 @@ internal object WalletCoreJni {
     external fun lastErrorMessage(): String?
 
     external fun primaryAddressFromMnemonic(mnemonic: String, mainnet: Boolean): String
+    external fun subaddressFromMnemonic(
+        mnemonic: String,
+        accountIndex: Int,
+        subaddressIndex: Int,
+        mainnet: Boolean
+    ): String
 
     external fun openFromMnemonic(walletId: String, mnemonic: String, restoreHeight: Long, mainnet: Boolean)
 
@@ -373,18 +550,71 @@ internal object WalletCoreJni {
      * Returns: long[2] = [total_piconero, unlocked_piconero]
      */
     external fun getBalance(walletId: String): LongArray
+    external fun getBalanceWithFilter(walletId: String, filterJson: String?): LongArray
 
     external fun listTransfersJson(walletId: String): String
 
     external fun exportOutputsJson(walletId: String): String
 
+    // ===== Scan / tuning knobs (iOS parity) =====
+
+    /**
+     * Set the subaddress gap limit used by scanning.
+     *
+     * Mirrors the C ABI:
+     *   int32_t wallet_set_gap_limit(const char* wallet_id, uint32_t gap_limit)
+     */
+    external fun setGapLimit(walletId: String, gapLimit: Int)
+
+    /**
+     * Set an environment variable in the native process.
+     *
+     * Used for iOS parity for settings like:
+     * - WALLETCORE_ACCOUNT_GAP (account lookahead)
+     */
+    external fun setEnv(key: String, value: String)
+
     // ===== Send / Fee preview / Sweep (Send Max) =====
 
     external fun previewFee(walletId: String, nodeUrl: String?, destinationsJson: String, ringLen: Int): String
+    external fun previewFeeWithFilter(
+        walletId: String,
+        nodeUrl: String?,
+        destinationsJson: String,
+        filterJson: String?,
+        ringLen: Int
+    ): String
 
     external fun send(walletId: String, nodeUrl: String?, toAddress: String, amountPiconero: Long, ringLen: Int): String
+    external fun sendWithFilter(
+        walletId: String,
+        nodeUrl: String?,
+        destinationsJson: String,
+        filterJson: String?,
+        ringLen: Int
+    ): String
 
     external fun previewSweep(walletId: String, nodeUrl: String?, toAddress: String, ringLen: Int): String
+    external fun previewSweepWithFilter(
+        walletId: String,
+        nodeUrl: String?,
+        toAddress: String,
+        filterJson: String?,
+        ringLen: Int
+    ): String
 
     external fun sweep(walletId: String, nodeUrl: String?, toAddress: String, ringLen: Int): String
+    external fun sweepWithFilter(
+        walletId: String,
+        nodeUrl: String?,
+        toAddress: String,
+        filterJson: String?,
+        ringLen: Int
+    ): String
+
+    external fun forceRescanFromHeight(walletId: String, fromHeight: Long)
+    external fun resetTrackedOutputs(walletId: String)
+    external fun startZmqListener(endpoint: String)
+    external fun stopZmqListener()
+    external fun zmqSequence(): Long
 }

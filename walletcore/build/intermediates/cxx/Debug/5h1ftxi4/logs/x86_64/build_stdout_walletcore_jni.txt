@@ -1,0 +1,2 @@
+ninja: Entering directory `/Users/steve/supermegamartandwalletcore/nexawal-android/walletcore/.cxx/Debug/5h1ftxi4/x86_64'
+ninja: no work to do.

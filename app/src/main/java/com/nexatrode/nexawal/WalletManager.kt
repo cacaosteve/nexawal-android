@@ -19,9 +19,13 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
+import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.decodeFromString
+import kotlinx.serialization.encodeToString
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import org.json.JSONObject
 import java.io.File
 import java.io.IOException
 import java.util.concurrent.TimeUnit
@@ -42,18 +46,28 @@ import java.util.concurrent.atomic.AtomicBoolean
  * - We treat one wallet slot as authoritative (default walletId: "main_wallet").
  * - We persist:
  *     - settings.json (node URL) — safe to exist even before any wallet is created/imported
- *     - metadata.json (mnemonic + restore height + network flag + node URL) — dev-only for now
+ *     - metadata.json (Keystore-encrypted mnemonic + restore height + network flag + node URL)
  *     - <walletId>.cache — walletcore cache blob
- *
- * SECURITY NOTE:
- * - Storing the mnemonic in plaintext on disk is NOT production-safe.
- * - This is implemented as a bring-up step to mirror iOS flow quickly.
- * - In production, migrate mnemonic storage to Android Keystore-backed encryption.
  */
 class WalletManager(
     private val appContext: Context,
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
 ) {
+
+    @Serializable
+    data class ReceiveSubaddressEntry(
+        val accountIndex: Int = 0,
+        val subaddressIndex: Int,
+        val label: String = "",
+        val createdAtMs: Long = System.currentTimeMillis(),
+    )
+
+    @Serializable
+    data class ReceiveSubaddressBook(
+        val accountIndex: Int = 0,
+        val nextSubaddressIndex: Int = 1,
+        val entries: List<ReceiveSubaddressEntry> = emptyList(),
+    )
 
     data class UiState(
         val walletId: String? = null,
@@ -76,6 +90,8 @@ class WalletManager(
         val walletAddress: String? = null,
 
         val refreshInProgress: Boolean = false,
+        val refreshStartedAtMs: Long? = null,
+        val refreshLastProgressAtMs: Long? = null,
         val lastError: String? = null,
         val version: String? = null,
         val syncStatus: WalletCore.SyncStatus? = null,
@@ -110,6 +126,7 @@ class WalletManager(
 
         val lastBalanceRefreshAtMs: Long? = null,
         val lastTransfersRefreshAtMs: Long? = null,
+        val balanceIsStaleWhileSyncing: Boolean = false,
 
         // Send / sweep results (last-known)
         val lastFeePreview: SendJson.FeeResult? = null,
@@ -133,9 +150,7 @@ class WalletManager(
     /**
      * Minimal metadata stored on disk for the single-wallet slot.
      *
-     * DEV NOTE:
-     * - Mnemonic is stored in plaintext here to match iOS functionality quickly.
-     * - Replace this with encrypted storage before production.
+     * Mnemonic is stored as an Android Keystore-encrypted blob, not plaintext.
      */
     data class StoredWalletMetadata(
         val walletId: String = DEFAULT_WALLET_ID,
@@ -175,11 +190,15 @@ class WalletManager(
         isLenient = true
         explicitNulls = false
     }
+    private val receiveBookJson: Json = Json {
+        ignoreUnknownKeys = true
+        encodeDefaults = true
+    }
 
     /**
      * Default node URL (matches iOS default behavior).
      *
-     * iOS defaultAddress: "10.0.2.2:18081"
+     * Public TLS node for non-local testing.
      */
     fun defaultNodeUrl(): String = "http://10.0.2.2:18081"
 
@@ -190,11 +209,20 @@ class WalletManager(
      */
     fun currentNodeUrl(): String = _state.value.nodeUrl ?: defaultNodeUrl()
 
+    private fun migrateLegacyDefaultNodeUrl(nodeUrl: String): String {
+        return when (normalizeNodeUrl(nodeUrl)) {
+            "https://node.sethforprivacy.com:443",
+            "https://node.monerod.org:443" -> defaultNodeUrl()
+            else -> normalizeNodeUrl(nodeUrl)
+        }
+    }
+
     /**
      * Normalize user input into a URL string that walletcore expects.
      *
      * Accepts:
      * - "10.0.2.2:18081" -> "http://10.0.2.2:18081"
+     * - "node.example.com:443" -> "https://node.example.com:443"
      * - "http://10.0.2.2:18081" (unchanged)
      * - "https://example.com:18081" (unchanged)
      *
@@ -206,6 +234,8 @@ class WalletManager(
 
         return if (s.startsWith("http://", ignoreCase = true) || s.startsWith("https://", ignoreCase = true)) {
             s
+        } else if (s.endsWith(":443")) {
+            "https://$s"
         } else {
             "http://$s"
         }
@@ -342,6 +372,46 @@ class WalletManager(
         metadataFile().exists()
     }
 
+    suspend fun loadReceiveSubaddressBook(): ReceiveSubaddressBook = withContext(ioDispatcher) {
+        val existing = runCatching {
+            val f = receiveSubaddressesFile()
+            if (!f.exists()) null else receiveBookJson.decodeFromString<ReceiveSubaddressBook>(f.readText())
+        }.getOrNull()
+
+        val normalized = normalizeReceiveBook(existing)
+        persistReceiveSubaddressBook(normalized)
+        normalized
+    }
+
+    suspend fun createReceiveSubaddress(label: String = ""): ReceiveSubaddressEntry = withContext(ioDispatcher) {
+        val current = loadReceiveSubaddressBook()
+        val nextIndex = current.nextSubaddressIndex.coerceAtLeast(1)
+        val entry = ReceiveSubaddressEntry(
+            accountIndex = 0,
+            subaddressIndex = nextIndex,
+            label = label.trim(),
+            createdAtMs = System.currentTimeMillis(),
+        )
+        val updated = normalizeReceiveBook(
+            current.copy(
+                nextSubaddressIndex = nextIndex + 1,
+                entries = current.entries + entry
+            )
+        )
+        persistReceiveSubaddressBook(updated)
+        entry
+    }
+
+    suspend fun deriveReceiveAddress(subaddressIndex: Int): String = withContext(ioDispatcher) {
+        val meta = readMetadata()
+        WalletCore.deriveSubaddressFromMnemonic(
+            mnemonic = meta.mnemonic,
+            accountIndex = 0,
+            subaddressIndex = subaddressIndex,
+            mainnet = meta.mainnet
+        )
+    }
+
     /**
      * Open/register a wallet from mnemonic and attempt to import persisted cache if present.
      *
@@ -418,7 +488,7 @@ class WalletManager(
         // Refresh status snapshot after open/import.
         updateStatusSnapshot(walletId)
 
-        // Persist metadata for auto-load on next launch (dev-only plaintext storage).
+        // Persist metadata for auto-load on next launch.
         if (persist) {
             persistMetadata(
                 StoredWalletMetadata(
@@ -521,6 +591,8 @@ class WalletManager(
         refreshInProgress.set(true)
         _state.value = _state.value.copy(
             refreshInProgress = true,
+            refreshStartedAtMs = System.currentTimeMillis(),
+            refreshLastProgressAtMs = null,
             lastError = null,
             refreshTargetHeight = null,
             gapLimit = gapLimit,
@@ -570,12 +642,15 @@ class WalletManager(
 
                 _state.value = _state.value.copy(
                     refreshInProgress = false,
+                    refreshStartedAtMs = null,
+                    refreshLastProgressAtMs = null,
                     syncStatus = st,
                     lastError = null,
                     refreshTargetHeight = null,
                     gapLimit = null,
                     accountGap = null,
                 )
+                refreshWalletDataSnapshots()
             } catch (ce: CancellationException) {
                 // Kotlin-side cancellation (we still request core cancel in cancelRefresh()).
                 val st = runCatching { WalletCore.syncStatus(walletId) }.getOrNull()
@@ -585,6 +660,8 @@ class WalletManager(
                 exportCacheAndPersist(walletId)
                 _state.value = _state.value.copy(
                     refreshInProgress = false,
+                    refreshStartedAtMs = null,
+                    refreshLastProgressAtMs = null,
                     refreshTargetHeight = null,
                     gapLimit = null,
                     accountGap = null,
@@ -595,6 +672,8 @@ class WalletManager(
                 val msg = t.message ?: t.javaClass.simpleName
                 _state.value = _state.value.copy(
                     refreshInProgress = false,
+                    refreshStartedAtMs = null,
+                    refreshLastProgressAtMs = null,
                     lastError = msg,
                     refreshTargetHeight = null,
                     gapLimit = null,
@@ -671,9 +750,9 @@ class WalletManager(
         val walletId = _state.value.walletId ?: return
         val bal = runCatching { WalletCore.getBalance(walletId) }.getOrNull()
         if (bal != null) {
-            _state.value = _state.value.copy(
+            applyBalanceSnapshot(
                 balance = bal,
-                lastBalanceRefreshAtMs = System.currentTimeMillis(),
+                allowAuthoritativeZero = isZeroBalanceAuthoritative(_state.value)
             )
         }
     }
@@ -703,6 +782,42 @@ class WalletManager(
     fun refreshWalletDataSnapshots() {
         refreshBalanceSnapshot()
         refreshTransfersSnapshot()
+    }
+
+    private fun isZeroBalanceAuthoritative(state: UiState): Boolean {
+        val st = state.syncStatus ?: return false
+        val observedNetworkTip = st.chainHeight > st.restoreHeight || st.chainTime > 0
+        val syncedWithinTolerance = st.chainHeight > 0 && st.lastScanned + 3 >= st.chainHeight
+        return observedNetworkTip && syncedWithinTolerance && !state.refreshInProgress
+    }
+
+    private fun applyBalanceSnapshot(
+        balance: WalletCore.Balance,
+        allowAuthoritativeZero: Boolean,
+    ) {
+        val current = _state.value
+        val knownTotal = maxOf(current.balance?.totalPiconero ?: 0L, 0L)
+        val knownUnlocked = maxOf(current.balance?.unlockedPiconero ?: 0L, 0L)
+        val hasKnownNonZero = knownTotal > 0L || knownUnlocked > 0L
+        val proposedZero = balance.totalPiconero == 0L && balance.unlockedPiconero == 0L
+
+        if (proposedZero && hasKnownNonZero && !allowAuthoritativeZero) {
+            Log.i(
+                "WalletManager",
+                "BALANCE_GUARD preserve-known-nonzero knownTotal=$knownTotal proposedTotal=0 refreshInProgress=${current.refreshInProgress}"
+            )
+            _state.value = current.copy(
+                balanceIsStaleWhileSyncing = true,
+                lastBalanceRefreshAtMs = System.currentTimeMillis(),
+            )
+            return
+        }
+
+        _state.value = current.copy(
+            balance = balance,
+            balanceIsStaleWhileSyncing = false,
+            lastBalanceRefreshAtMs = System.currentTimeMillis(),
+        )
     }
 
     /**
@@ -851,6 +966,14 @@ class WalletManager(
         }
     }
 
+    private fun isTerminalRefreshCoreError(message: String): Boolean {
+        val normalized = message.lowercase()
+        return normalized.contains("contiguous_scannable_blocks timeout/disconnect") ||
+            normalized.contains("invalid node") ||
+            normalized.contains("failed to connect daemon") ||
+            normalized.contains("response wasn't the expected json")
+    }
+
     private fun updateStatusSnapshot(walletId: String) {
         val st = runCatching { WalletCore.syncStatus(walletId) }.getOrNull()
         if (st != null) {
@@ -903,11 +1026,14 @@ class WalletManager(
     private suspend fun waitForRefreshCompletion(
         walletId: String,
         pollIntervalMs: Long = 200L,
-        stallTimeoutMs: Long = 45_000L,
+        slowFetchWarningMs: Long = 45_000L,
+        hardStallTimeoutMs: Long = 180_000L,
     ): WalletCore.SyncStatus = withContext(ioDispatcher) {
         var targetHeight: Long? = null
         var lastScannedSnapshot: Long = 0
-        var lastProgressAtMs = System.currentTimeMillis()
+        val refreshStartMs = System.currentTimeMillis()
+        var lastProgressAtMs = refreshStartMs
+        var slowFetchWarningLogged = false
 
         // Periodic persistence while refresh is running.
         var lastPersistAtMs = 0L
@@ -934,7 +1060,10 @@ class WalletManager(
             val st = WalletCore.syncStatus(walletId)
 
             // Push status into state continuously so Compose can render progress.
-            _state.value = _state.value.copy(syncStatus = st)
+            _state.value = _state.value.copy(
+                syncStatus = st,
+                refreshLastProgressAtMs = if (lastScannedSnapshot > 0L) lastProgressAtMs else null,
+            )
 
             // Mirror iOS: sample core error state even if progress continues.
             val nowMs = System.currentTimeMillis()
@@ -955,6 +1084,10 @@ class WalletManager(
                 val coreErr = runCatching { WalletCore.lastErrorMessage() }.getOrNull()
                 if (!coreErr.isNullOrBlank()) {
                     Log.w("WalletManager", "Core error sample during refresh: $coreErr")
+                    if (isTerminalRefreshCoreError(coreErr)) {
+                        exportCacheAndPersist(walletId)
+                        throw IOException(coreErr)
+                    }
                 }
             }
 
@@ -965,13 +1098,26 @@ class WalletManager(
                 val tip = targetHeight ?: st.chainHeight
                 val remaining = if (tip > 0) maxOf(0L, tip - st.lastScanned) else -1L
 
-                val dtMs = maxOf(1L, nowMs - lastRateSampleAtMs)
-                val dScanned = (st.lastScanned - lastRateSampleScanned).coerceAtLeast(0L)
-                val blocksPerSec = (dScanned.toDouble() * 1000.0) / dtMs.toDouble()
+                val localBlocksPerSec = run {
+                    val dtMs = maxOf(1L, nowMs - lastRateSampleAtMs)
+                    val dScanned = (st.lastScanned - lastRateSampleScanned).coerceAtLeast(0L)
+                    (dScanned.toDouble() * 1000.0) / dtMs.toDouble()
+                }
+                val averageBlocksPerSec = run {
+                    val elapsedMs = maxOf(1L, nowMs - refreshStartMs)
+                    val scannedSinceStart = (st.lastScanned - st.restoreHeight).coerceAtLeast(0L)
+                    (scannedSinceStart.toDouble() * 1000.0) / elapsedMs.toDouble()
+                }
+                val phase = when {
+                    targetHeight == null -> "connecting"
+                    st.lastScanned <= st.restoreHeight -> "fetching-first-batch"
+                    localBlocksPerSec <= 0.0 -> "fetching-next-batch"
+                    else -> "scanning"
+                }
 
                 Log.i(
                     "WalletManager",
-                    "⏳ Refresh progress: scanned=${st.lastScanned}, restore=${st.restoreHeight}, chain=${st.chainHeight}, target=${targetHeight ?: 0L}, remaining=$remaining, rate=${"%.1f".format(blocksPerSec)} blks/s"
+                    "⏳ Refresh progress: scanned=${st.lastScanned}, restore=${st.restoreHeight}, chain=${st.chainHeight}, target=${targetHeight ?: 0L}, remaining=$remaining, phase=$phase, avgRate=${"%.1f".format(averageBlocksPerSec)} blks/s"
                 )
 
                 lastRateSampleAtMs = nowMs
@@ -985,6 +1131,8 @@ class WalletManager(
             if (st.lastScanned > lastScannedSnapshot) {
                 lastScannedSnapshot = st.lastScanned
                 lastProgressAtMs = nowMs
+                _state.value = _state.value.copy(refreshLastProgressAtMs = nowMs)
+                slowFetchWarningLogged = false
             } else if (targetHeight != null && lastScannedSnapshot == 0L) {
                 // Defensive: if we started with lastScanned=0 and target gets set, reset the timer so we
                 // don't report a stall before any blocks are scanned.
@@ -1015,12 +1163,22 @@ class WalletManager(
                 if (t > 0) maxOf(0L, t - st.lastScanned) else null
             }
 
-            if (tip != null && remaining != null && remaining > 0 && (nowMs - lastProgressAtMs > stallTimeoutMs)) {
+            val stalledForMs = nowMs - lastProgressAtMs
+            if (tip != null && remaining != null && remaining > 0 && stalledForMs > slowFetchWarningMs && !slowFetchWarningLogged) {
+                slowFetchWarningLogged = true
+                Log.w(
+                    "WalletManager",
+                    "SLOW_NODE_FETCH: no scan cursor advance for ${stalledForMs}ms walletId=$walletId " +
+                        "lastScanned=${st.lastScanned} chainHeight=${st.chainHeight} target=$tip remaining=$remaining"
+                )
+            }
+
+            if (tip != null && remaining != null && remaining > 0 && stalledForMs > hardStallTimeoutMs) {
                 val coreErr = runCatching { WalletCore.lastErrorMessage() }.getOrNull()
 
                 Log.e(
                     "WalletManager",
-                    "STALL: refresh appears stuck (>${stallTimeoutMs}ms) walletId=$walletId " +
+                    "STALL: refresh appears stuck (>${hardStallTimeoutMs}ms) walletId=$walletId " +
                         "lastScanned=${st.lastScanned} restoreHeight=${st.restoreHeight} chainHeight=${st.chainHeight} " +
                         "target=$tip remaining=$remaining lastError=${coreErr ?: "<null>"}"
                 )
@@ -1031,7 +1189,7 @@ class WalletManager(
 
                 exportCacheAndPersist(walletId)
                 throw IOException(
-                    "Refresh stalled (>${stallTimeoutMs}ms) lastScanned=${st.lastScanned} chainHeight=${st.chainHeight}" +
+                    "Refresh stalled (>${hardStallTimeoutMs}ms) lastScanned=${st.lastScanned} chainHeight=${st.chainHeight}" +
                         (if (!coreErr.isNullOrBlank()) " coreErr=$coreErr" else "")
                 )
             }
@@ -1278,6 +1436,10 @@ class WalletManager(
             val c = cacheFile(DEFAULT_WALLET_ID, mainnet = true)
             if (c.exists()) c.delete()
         }
+        runCatching {
+            val r = receiveSubaddressesFile()
+            if (r.exists()) r.delete()
+        }
 
         _state.value = _state.value.copy(
             walletId = null,
@@ -1297,18 +1459,17 @@ class WalletManager(
         runCatching {
             val f = metadataFile()
             ensureParentDirExists(f)
-            // Very small, stable JSON blob; build manually to avoid extra plugin requirements.
-            val json = """
-                {
-                  "walletId": "${meta.walletId}",
-                  "mnemonic": "${meta.mnemonic.replace("\"", "\\\"")}",
-                  "restoreHeight": ${meta.restoreHeight},
-                  "mainnet": ${meta.mainnet},
-                  "nodeUrl": "${meta.nodeUrl.replace("\"", "\\\"")}",
-                  "savedAtMs": ${meta.savedAtMs}
-                }
-            """.trimIndent()
-            f.writeText(json)
+            val encrypted = MnemonicCipher.encrypt(meta.mnemonic)
+            val json = JSONObject()
+                .put("walletId", meta.walletId)
+                .put("encryptedMnemonic", encrypted.ciphertextBase64)
+                .put("mnemonicIv", encrypted.ivBase64)
+                .put("restoreHeight", meta.restoreHeight)
+                .put("mainnet", meta.mainnet)
+                .put("nodeUrl", meta.nodeUrl)
+                .put("savedAtMs", meta.savedAtMs)
+                .put("formatVersion", 2)
+            f.writeText(json.toString(2))
             _state.value = _state.value.copy(lastPersistedAtMs = System.currentTimeMillis(), hasStoredWallet = true)
         }.onFailure { t ->
             _state.value = _state.value.copy(lastError = "Failed to persist metadata: ${t.message ?: t.javaClass.simpleName}")
@@ -1317,49 +1478,62 @@ class WalletManager(
 
     private fun readMetadata(): StoredWalletMetadata {
         val f = metadataFile()
-        val raw = f.readText()
+        val json = JSONObject(f.readText())
 
-        // Minimal JSON extraction (no dependency on Android JSON libs here).
-        fun findString(key: String): String {
-            val needle = "\"$key\""
-            val idx = raw.indexOf(needle)
-            if (idx < 0) throw IllegalStateException("Missing key: $key")
-            val colon = raw.indexOf(':', idx)
-            val firstQuote = raw.indexOf('"', colon + 1)
-            val secondQuote = raw.indexOf('"', firstQuote + 1)
-            if (firstQuote < 0 || secondQuote < 0) throw IllegalStateException("Invalid string for key: $key")
-            return raw.substring(firstQuote + 1, secondQuote).replace("\\\"", "\"")
-        }
-        fun findLong(key: String): Long {
-            val needle = "\"$key\""
-            val idx = raw.indexOf(needle)
-            if (idx < 0) throw IllegalStateException("Missing key: $key")
-            val colon = raw.indexOf(':', idx)
-            val end = raw.indexOfAny(charArrayOf(',', '\n', '\r', '}'), startIndex = colon + 1).let { if (it < 0) raw.length else it }
-            return raw.substring(colon + 1, end).trim().toLong()
-        }
-        fun findBool(key: String): Boolean {
-            val needle = "\"$key\""
-            val idx = raw.indexOf(needle)
-            if (idx < 0) throw IllegalStateException("Missing key: $key")
-            val colon = raw.indexOf(':', idx)
-            val end = raw.indexOfAny(charArrayOf(',', '\n', '\r', '}'), startIndex = colon + 1).let { if (it < 0) raw.length else it }
-            return raw.substring(colon + 1, end).trim().toBoolean()
+        val walletId = json.optString("walletId", DEFAULT_WALLET_ID).ifBlank { DEFAULT_WALLET_ID }
+        val restoreHeight = if (json.has("restoreHeight")) json.optLong("restoreHeight", 0L) else 0L
+        val mainnet = if (json.has("mainnet")) json.optBoolean("mainnet", true) else true
+        val nodeUrl = migrateLegacyDefaultNodeUrl(
+            json.optString("nodeUrl", defaultNodeUrl()).ifBlank { defaultNodeUrl() }
+        )
+        val savedAtMs = if (json.has("savedAtMs")) json.optLong("savedAtMs", 0L) else 0L
+
+        val encryptedMnemonic = json.optString("encryptedMnemonic", "").trim()
+        val mnemonicIv = json.optString("mnemonicIv", "").trim()
+
+        val mnemonic = if (encryptedMnemonic.isNotEmpty() && mnemonicIv.isNotEmpty()) {
+            MnemonicCipher.decrypt(
+                ivBase64 = mnemonicIv,
+                ciphertextBase64 = encryptedMnemonic
+            )
+        } else {
+            val plaintextMnemonic = json.optString("mnemonic", "").trim()
+            if (plaintextMnemonic.isEmpty()) {
+                throw IllegalStateException("Stored metadata does not contain a mnemonic")
+            }
+
+            // Transparent migration from legacy plaintext metadata.
+            persistMetadata(
+                StoredWalletMetadata(
+                    walletId = walletId,
+                    mnemonic = plaintextMnemonic,
+                    restoreHeight = restoreHeight,
+                    mainnet = mainnet,
+                    nodeUrl = nodeUrl,
+                    savedAtMs = savedAtMs,
+                )
+            )
+            plaintextMnemonic
         }
 
         return StoredWalletMetadata(
-            walletId = runCatching { findString("walletId") }.getOrElse { DEFAULT_WALLET_ID },
-            mnemonic = findString("mnemonic"),
-            restoreHeight = runCatching { findLong("restoreHeight") }.getOrElse { 0L },
-            mainnet = runCatching { findBool("mainnet") }.getOrElse { true },
-            nodeUrl = runCatching { findString("nodeUrl") }.getOrElse { defaultNodeUrl() },
-            savedAtMs = runCatching { findLong("savedAtMs") }.getOrElse { 0L },
+            walletId = walletId,
+            mnemonic = mnemonic,
+            restoreHeight = restoreHeight,
+            mainnet = mainnet,
+            nodeUrl = nodeUrl,
+            savedAtMs = savedAtMs,
         )
     }
 
     private fun metadataFile(): File {
         val dir = File(appContext.filesDir, "WalletSlot")
         return File(dir, "metadata.json")
+    }
+
+    private fun receiveSubaddressesFile(): File {
+        val dir = File(appContext.filesDir, "WalletSlot")
+        return File(dir, "receive_subaddresses.json")
     }
 
     private fun settingsFile(): File {
@@ -1414,9 +1588,49 @@ class WalletManager(
         }
 
         return StoredSettings(
-            nodeUrl = findString("nodeUrl"),
+            nodeUrl = migrateLegacyDefaultNodeUrl(findString("nodeUrl")),
             savedAtMs = runCatching { findLong("savedAtMs") }.getOrElse { 0L },
         )
+    }
+
+    private fun normalizeReceiveBook(book: ReceiveSubaddressBook?): ReceiveSubaddressBook {
+        val baseEntries = book?.entries.orEmpty()
+        val withPrimary = if (baseEntries.any { it.accountIndex == 0 && it.subaddressIndex == 0 }) {
+            baseEntries
+        } else {
+            listOf(
+                ReceiveSubaddressEntry(
+                    accountIndex = 0,
+                    subaddressIndex = 0,
+                    label = "Primary",
+                    createdAtMs = System.currentTimeMillis(),
+                )
+            ) + baseEntries
+        }
+
+        val deduped = withPrimary
+            .filter { it.accountIndex == 0 }
+            .distinctBy { "${it.accountIndex}:${it.subaddressIndex}" }
+            .sortedWith(compareBy<ReceiveSubaddressEntry> { it.subaddressIndex }.thenBy { it.createdAtMs })
+
+        val maxIndex = deduped.maxOfOrNull { it.subaddressIndex } ?: 0
+        val next = maxOf(book?.nextSubaddressIndex ?: 1, maxIndex + 1)
+
+        return ReceiveSubaddressBook(
+            accountIndex = 0,
+            nextSubaddressIndex = next,
+            entries = deduped,
+        )
+    }
+
+    private fun persistReceiveSubaddressBook(book: ReceiveSubaddressBook) {
+        runCatching {
+            val f = receiveSubaddressesFile()
+            ensureParentDirExists(f)
+            f.writeText(receiveBookJson.encodeToString(book))
+        }.onFailure { t ->
+            _state.value = _state.value.copy(lastError = "Failed to persist receive addresses: ${t.message ?: t.javaClass.simpleName}")
+        }
     }
 
     /**

@@ -1,0 +1,4 @@
+/Users/steve/Library/Android/sdk/cmake/3.22.1/bin/ninja \
+  -C \
+  /Users/steve/supermegamartandwalletcore/nexawal-android/walletcore/.cxx/Debug/5h1ftxi4/arm64-v8a \
+  walletcore_jni

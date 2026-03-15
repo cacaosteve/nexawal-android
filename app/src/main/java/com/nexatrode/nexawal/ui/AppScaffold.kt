@@ -1,6 +1,7 @@
 package com.nexatrode.nexawal.ui
 
 import android.content.Intent
+import androidx.activity.ComponentActivity
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -32,6 +33,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.ProgressIndicatorDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -61,8 +63,10 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
+import com.nexatrode.nexawal.DeviceAuthGate
 import com.nexatrode.nexawal.MoneroConfig
 import com.nexatrode.nexawal.MoneroQr
+import com.nexatrode.nexawal.WalletManager.ReceiveSubaddressEntry
 import com.nexatrode.nexawal.SendJson
 import com.nexatrode.nexawal.TimeFormat
 import com.nexatrode.nexawal.Transfer
@@ -85,6 +89,7 @@ fun AppScaffold(
     val navController = rememberNavController()
     val items = listOf(
         BottomNavItem.Wallet,
+        BottomNavItem.Receive,
         BottomNavItem.Send,
         BottomNavItem.Settings,
     )
@@ -135,6 +140,9 @@ fun AppScaffold(
             composable(BottomNavItem.Send.route) {
                 SendScreen(walletManager = walletManager)
             }
+            composable(BottomNavItem.Receive.route) {
+                ReceiveScreen(walletManager = walletManager)
+            }
             composable(BottomNavItem.Settings.route) {
                 SettingsScreen(walletManager = walletManager)
             }
@@ -159,6 +167,12 @@ private sealed class BottomNavItem(
         icon = Icons.AutoMirrored.Filled.Send
     )
 
+    data object Receive : BottomNavItem(
+        route = "receive",
+        label = "Receive",
+        icon = Icons.Filled.Home
+    )
+
     data object Settings : BottomNavItem(
         route = "settings",
         label = "Settings",
@@ -167,14 +181,12 @@ private sealed class BottomNavItem(
 }
 
 /**
- * Wallet screen refactored to mirror iOS WalletView layout:
+ * Wallet screen:
  * - Balance card (Total + Unlocked)
  * - Address card (monospace, selectable)
- * - Sync status (heights + progress)
+ * - Sync summary + progress
  * - Transactions list (tap row -> details dialog)
- * - Actions row (Refresh/Cancel or Send/Receive)
- *
- * NOTE: "Receive" is not implemented yet; for parity we show a placeholder action.
+ * - Refresh/cancel actions
  */
 @Composable
 private fun WalletScreen(walletManager: WalletManager) {
@@ -220,12 +232,6 @@ private fun WalletScreen(walletManager: WalletManager) {
     var selectedTransfer by remember { mutableStateOf<Transfer?>(null) }
     var showTransferDetails by remember { mutableStateOf(false) }
 
-    var showReceiveDialog by remember { mutableStateOf(false) }
-
-    // Receive UI inputs (mirror iOS ReceiveView)
-    var receiveAmountXmr by remember { mutableStateOf("") }
-    var receiveDescription by remember { mutableStateOf("") }
-
     val mergedError = errorText ?: state.lastError
 
     val totalXmr = state.balance?.totalXmr ?: "0.000000000000"
@@ -253,11 +259,6 @@ private fun WalletScreen(walletManager: WalletManager) {
 
     val remainingBlocks = if (targetHeight > 0L) (targetHeight - lastScanned).coerceAtLeast(0L) else 0L
     val isSynced = targetHeight > 0L && lastScanned >= targetHeight
-
-    // iOS parity: show scan tuning values (persisted) if available.
-    // These are populated by WalletManager at refresh start.
-    val accountGap = state.accountGap
-    val gapLimit = state.gapLimit
 
     // iOS-like blocks/sec:
     // - compute instantaneous rate from lastScanned deltas
@@ -468,23 +469,37 @@ private fun WalletScreen(walletManager: WalletManager) {
             shadowElevation = 0.dp,
         ) {
             Column(modifier = Modifier.padding(12.dp)) {
-                KeyValueRow("Chain Height", chainHeight.toString(), labelColor = iosSecondary, valueColor = iosPrimaryText)
-                KeyValueRow("Last Scanned", lastScanned.toString(), labelColor = iosSecondary, valueColor = iosPrimaryText)
+                val syncHeadline = when {
+                    isSynced -> "Wallet is fully synced"
+                    targetHeight == 0L -> "Connecting to node"
+                    state.refreshInProgress && lastScanned == restoreHeight -> "Fetching first block batch"
+                    state.refreshInProgress && blocksPerSecSmoothed <= 0.0 -> "Fetching more blocks"
+                    else -> "Syncing wallet"
+                }
+                val syncDetail = when {
+                    isSynced -> "Scanned to block $lastScanned"
+                    targetHeight == 0L -> "Waiting for remote chain height"
+                    state.refreshInProgress && lastScanned == restoreHeight -> "Node is responding. Waiting for initial blocks from height $restoreHeight"
+                    state.refreshInProgress && blocksPerSecSmoothed <= 0.0 -> "Slow remote node response. $remainingBlocks blocks remaining"
+                    else -> "$remainingBlocks blocks remaining"
+                }
+
+                Text(syncHeadline, color = iosPrimaryText, fontWeight = FontWeight.SemiBold)
+                Spacer(Modifier.height(4.dp))
+                Text(syncDetail, color = iosSecondary)
+                Spacer(Modifier.height(10.dp))
+
+                KeyValueRow("Scanned Height", lastScanned.toString(), labelColor = iosSecondary, valueColor = iosPrimaryText)
+                if (targetHeight > 0L) {
+                    KeyValueRow("Network Height", targetHeight.toString(), labelColor = iosSecondary, valueColor = iosPrimaryText)
+                }
                 if (!isSynced) {
                     KeyValueRow("Remaining Blocks", remainingBlocks.toString(), labelColor = iosSecondary, valueColor = iosPrimaryText)
                 }
-                KeyValueRow("Target Height", targetHeight.toString(), labelColor = iosSecondary, valueColor = iosPrimaryText)
                 KeyValueRow("Restore Height", restoreHeight.toString(), labelColor = iosSecondary, valueColor = iosPrimaryText)
-
-                // iOS parity rows (MoneroConfig.accountGap / MoneroConfig.gapLimit)
-                if (accountGap != null) {
-                    KeyValueRow("Accounts (lookahead)", accountGap.toString(), labelColor = iosSecondary, valueColor = iosPrimaryText)
+                if (state.refreshInProgress && blocksPerSecSmoothed > 0.0) {
+                    KeyValueRow("Scan Speed", String.format("%.1f blk/s", blocksPerSecSmoothed), labelColor = iosSecondary, valueColor = iosPrimaryText)
                 }
-                if (gapLimit != null) {
-                    KeyValueRow("Gap limit", gapLimit.toString(), labelColor = iosSecondary, valueColor = iosPrimaryText)
-                }
-
-                KeyValueRow("Throughput", String.format("%.1f blk/s", blocksPerSecSmoothed), labelColor = iosSecondary, valueColor = iosPrimaryText)
 
                 Spacer(Modifier.height(10.dp))
 
@@ -499,8 +514,9 @@ private fun WalletScreen(walletManager: WalletManager) {
         Spacer(Modifier.height(6.dp))
         Text(
             if (isSynced) "Wallet is fully synced"
-            else if (targetHeight == 0L) "Initializing scan…"
-            else if (lastScanned == restoreHeight) "Initializing scan…"
+            else if (targetHeight == 0L) "Connecting to node…"
+            else if (state.refreshInProgress && lastScanned == restoreHeight) "Fetching first block batch from node…"
+            else if (state.refreshInProgress && blocksPerSecSmoothed <= 0.0) "Fetching next block batch from node…"
             else "Syncing… $remainingBlocks blocks remaining @ ${String.format("%.1f", blocksPerSecSmoothed)} blks/s",
             color = Color.Gray
         )
@@ -527,7 +543,7 @@ private fun WalletScreen(walletManager: WalletManager) {
 
         Spacer(Modifier.height(16.dp))
 
-        // Actions row (iOS-like)
+        // Actions row
         if (state.refreshInProgress) {
             Row(modifier = Modifier.fillMaxWidth()) {
                 Button(
@@ -545,43 +561,30 @@ private fun WalletScreen(walletManager: WalletManager) {
                 ) { Text("Cancel") }
             }
         } else {
-            Row(modifier = Modifier.fillMaxWidth()) {
-                Button(
-                    onClick = {
-                        errorText = null
-                        scope.launch {
-                            try {
-                                walletManager.refreshWallet()
-                                walletManager.refreshWalletDataSnapshots()
-                                statusText = "Refreshed"
-                            } catch (t: Throwable) {
-                                errorText = t.message ?: t.javaClass.simpleName
-                            }
+            Button(
+                onClick = {
+                    errorText = null
+                    scope.launch {
+                        try {
+                            walletManager.refreshWallet()
+                            walletManager.refreshWalletDataSnapshots()
+                            statusText = "Refreshed"
+                        } catch (t: Throwable) {
+                            errorText = t.message ?: t.javaClass.simpleName
                         }
-                    },
-                    modifier = Modifier.weight(1f)
-                ) { Text("Refresh Wallet") }
-
-                Spacer(Modifier.width(12.dp))
-
-                Button(
-                    onClick = {
-                        // We don't have modal navigation yet; user can go to Send tab.
-                        statusText = "Use Send tab"
-                    },
-                    modifier = Modifier.weight(1f)
-                ) { Text("Send") }
-
-                Spacer(Modifier.width(12.dp))
-
-                Button(
-                    onClick = {
-                        errorText = null
-                        showReceiveDialog = true
-                    },
-                    modifier = Modifier.weight(1f)
-                ) { Text("Receive") }
+                    }
+                },
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text("Refresh Wallet")
             }
+
+            Spacer(Modifier.height(8.dp))
+
+            Text(
+                "Use the Send and Receive tabs for payments and new subaddresses.",
+                color = iosSecondary
+            )
         }
 
         statusText?.let {
@@ -610,144 +613,6 @@ private fun WalletScreen(walletManager: WalletManager) {
             onDismiss = {
                 showTransferDetails = false
                 selectedTransfer = null
-            }
-        )
-    }
-
-    if (showReceiveDialog) {
-        val addr = state.walletAddress?.trim().orEmpty()
-        val uri = if (addr.isNotEmpty()) {
-            MoneroQr.buildUri(
-                address = addr,
-                amountXmr = receiveAmountXmr.takeIf { it.trim().isNotEmpty() }?.trim(),
-                description = receiveDescription.takeIf { it.trim().isNotEmpty() }?.trim(),
-            )
-        } else {
-            ""
-        }
-
-        val qrBitmap = runCatching {
-            if (uri.isNotEmpty()) MoneroQr.qrBitmap(uri, sizePx = 640) else null
-        }.getOrNull()
-
-        AlertDialog(
-            onDismissRequest = { showReceiveDialog = false },
-            title = { Text("Receive") },
-            text = {
-                Column {
-                    Text("Address", color = Color.Gray)
-                    Spacer(Modifier.height(6.dp))
-                    SelectionContainer {
-                        Text(
-                            if (addr.isNotEmpty()) addr else "(no address yet)",
-                            fontFamily = FontFamily.Monospace
-                        )
-                    }
-
-                    Spacer(Modifier.height(12.dp))
-
-                    Text("Amount (XMR) (optional)", color = Color.Gray)
-                    OutlinedTextField(
-                        value = receiveAmountXmr,
-                        onValueChange = { receiveAmountXmr = it },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth(),
-                        placeholder = { Text("0.0") }
-                    )
-
-                    Spacer(Modifier.height(8.dp))
-
-                    Text("Description (optional)", color = Color.Gray)
-                    OutlinedTextField(
-                        value = receiveDescription,
-                        onValueChange = { receiveDescription = it },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth(),
-                        placeholder = { Text("What is this for?") }
-                    )
-
-                    Spacer(Modifier.height(12.dp))
-
-                    Text("Monero URI", color = Color.Gray)
-                    Spacer(Modifier.height(6.dp))
-                    SelectionContainer {
-                        Text(
-                            if (uri.isNotEmpty()) uri else "(unavailable)",
-                            fontFamily = FontFamily.Monospace,
-                            maxLines = 4,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    }
-
-                    Spacer(Modifier.height(12.dp))
-
-                    if (qrBitmap != null) {
-                        Image(
-                            bitmap = qrBitmap.asImageBitmap(),
-                            contentDescription = "Monero payment request QR"
-                        )
-                    } else {
-                        Text("QR unavailable", color = Color.Gray)
-                    }
-                }
-            },
-            confirmButton = {
-                Button(onClick = {
-                    errorText = null
-                    if (addr.isEmpty()) {
-                        statusText = "No address available yet"
-                        showReceiveDialog = false
-                        return@Button
-                    }
-                    // Copy URI (matches iOS share/copy friendliness)
-                    scope.launch {
-                        ClipboardCompat.setText(clipboard, if (uri.isNotEmpty()) uri else addr)
-                    }
-                    statusText = "Copied"
-                    showReceiveDialog = false
-                }) {
-                    Text("Copy")
-                }
-            },
-            dismissButton = {
-                Button(onClick = {
-                    errorText = null
-                    if (uri.isEmpty() || qrBitmap == null) {
-                        statusText = "Nothing to share yet"
-                        showReceiveDialog = false
-                        return@Button
-                    }
-
-                    runCatching {
-                        // Write QR bitmap to cache and share it.
-                        val dir = File(context.cacheDir, "shares").apply { mkdirs() }
-                        val outFile = File(dir, "monero_receive_qr.png")
-                        FileOutputStream(outFile).use { fos ->
-                            qrBitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, fos)
-                        }
-
-                        val uriFile = FileProvider.getUriForFile(
-                            context,
-                            context.packageName + ".fileprovider",
-                            outFile
-                        )
-
-                        val shareIntent = Intent(Intent.ACTION_SEND).apply {
-                            type = "image/png"
-                            putExtra(Intent.EXTRA_STREAM, uriFile)
-                            putExtra(Intent.EXTRA_TEXT, uri)
-                            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                        }
-
-                        context.startActivity(Intent.createChooser(shareIntent, "Share"))
-                    }.onFailure { t ->
-                        statusText = "Share failed: ${t.message ?: t.javaClass.simpleName}"
-                    }
-
-                    showReceiveDialog = false
-                }) {
-                    Text("Share")
-                }
             }
         )
     }
@@ -878,177 +743,514 @@ private fun TransferDetailsDialog(
 }
 
 /**
+ * Receive screen with persisted receive subaddresses, QR, copy, and share.
+ */
+@Composable
+private fun ReceiveScreen(walletManager: WalletManager) {
+    val scope = rememberCoroutineScope()
+    val context = LocalContext.current
+    val clipboard = ClipboardCompat.current()
+
+    var receiveEntries by remember { mutableStateOf<List<ReceiveSubaddressEntry>>(emptyList()) }
+    var selectedSubaddressIndex by remember { mutableStateOf(0) }
+    var receiveAddress by remember { mutableStateOf("") }
+    var amountXmr by remember { mutableStateOf("") }
+    var description by remember { mutableStateOf("") }
+    var statusText by remember { mutableStateOf<String?>(null) }
+    var showCreatePrompt by remember { mutableStateOf(false) }
+    var newLabel by remember { mutableStateOf("") }
+
+    suspend fun refreshAddressBook() {
+        val book = walletManager.loadReceiveSubaddressBook()
+        receiveEntries = book.entries
+        if (book.entries.none { it.subaddressIndex == selectedSubaddressIndex }) {
+            selectedSubaddressIndex = 0
+        }
+        receiveAddress = walletManager.deriveReceiveAddress(selectedSubaddressIndex)
+    }
+
+    LaunchedEffect(Unit) {
+        runCatching { refreshAddressBook() }
+            .onFailure { statusText = it.message ?: it.javaClass.simpleName }
+    }
+
+    LaunchedEffect(selectedSubaddressIndex) {
+        if (receiveEntries.isEmpty()) return@LaunchedEffect
+        runCatching {
+            receiveAddress = walletManager.deriveReceiveAddress(selectedSubaddressIndex)
+        }.onFailure { statusText = it.message ?: it.javaClass.simpleName }
+    }
+
+    val paymentUri = if (receiveAddress.isNotBlank()) {
+        MoneroQr.buildUri(
+            address = receiveAddress,
+            amountXmr = amountXmr.trim().takeIf { it.isNotEmpty() },
+            description = description.trim().takeIf { it.isNotEmpty() },
+        )
+    } else {
+        ""
+    }
+
+    val qrBitmap = remember(paymentUri) {
+        runCatching {
+            if (paymentUri.isNotEmpty()) MoneroQr.qrBitmap(paymentUri, sizePx = 640) else null
+        }.getOrNull()
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(16.dp)
+    ) {
+        Text("Receive")
+        Spacer(Modifier.height(12.dp))
+
+        Text("Address", color = Color.Gray)
+        Spacer(Modifier.height(6.dp))
+
+        if (receiveEntries.isEmpty()) {
+            Text("Loading receive addresses…", color = Color.Gray)
+        } else {
+            Text(
+                receiveEntries.firstOrNull { it.subaddressIndex == selectedSubaddressIndex }?.let {
+                    val label = it.label.trim()
+                    if (label.isEmpty()) "Selected: Subaddress ${it.subaddressIndex}" else "Selected: $label"
+                } ?: "Selected: Subaddress $selectedSubaddressIndex"
+            )
+
+            Spacer(Modifier.height(8.dp))
+
+            receiveEntries.forEach { entry ->
+                val title = entry.label.trim().ifEmpty { "Subaddress ${entry.subaddressIndex}" }
+                Button(
+                    onClick = { selectedSubaddressIndex = entry.subaddressIndex },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(if (entry.subaddressIndex == selectedSubaddressIndex) "Selected: $title" else title)
+                }
+                Spacer(Modifier.height(4.dp))
+            }
+
+            Spacer(Modifier.height(8.dp))
+
+            Button(
+                onClick = { showCreatePrompt = true },
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text("New receive address")
+            }
+        }
+
+        Spacer(Modifier.height(12.dp))
+
+        Text("Monero address", color = Color.Gray)
+        Spacer(Modifier.height(6.dp))
+        SelectionContainer {
+            Text(receiveAddress.ifBlank { "(unavailable)" }, fontFamily = FontFamily.Monospace)
+        }
+
+        Spacer(Modifier.height(12.dp))
+
+        Text("Amount (optional)", color = Color.Gray)
+        OutlinedTextField(
+            value = amountXmr,
+            onValueChange = { amountXmr = it },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth(),
+            placeholder = { Text("0.0") }
+        )
+
+        Spacer(Modifier.height(8.dp))
+
+        Text("Description (optional)", color = Color.Gray)
+        OutlinedTextField(
+            value = description,
+            onValueChange = { description = it },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth(),
+            placeholder = { Text("What is this for?") }
+        )
+
+        Spacer(Modifier.height(12.dp))
+
+        Text("Monero URI", color = Color.Gray)
+        Spacer(Modifier.height(6.dp))
+        SelectionContainer {
+            Text(
+                paymentUri.ifBlank { "(unavailable)" },
+                fontFamily = FontFamily.Monospace,
+                maxLines = 5,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+
+        Spacer(Modifier.height(12.dp))
+
+        if (qrBitmap != null) {
+            Image(
+                bitmap = qrBitmap.asImageBitmap(),
+                contentDescription = "Monero receive QR"
+            )
+        } else {
+            Text("QR unavailable", color = Color.Gray)
+        }
+
+        Spacer(Modifier.height(12.dp))
+
+        Button(
+            onClick = {
+                scope.launch {
+                    ClipboardCompat.setText(clipboard, if (paymentUri.isNotBlank()) paymentUri else receiveAddress)
+                    statusText = "Copied"
+                }
+            },
+            enabled = receiveAddress.isNotBlank(),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text("Copy")
+        }
+
+        Spacer(Modifier.height(8.dp))
+
+        Button(
+            onClick = {
+                if (paymentUri.isBlank() || qrBitmap == null) {
+                    statusText = "Nothing to share yet"
+                    return@Button
+                }
+
+                runCatching {
+                    val dir = File(context.cacheDir, "shares").apply { mkdirs() }
+                    val outFile = File(dir, "monero_receive_qr.png")
+                    FileOutputStream(outFile).use { fos ->
+                        qrBitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, fos)
+                    }
+
+                    val uriFile = FileProvider.getUriForFile(
+                        context,
+                        context.packageName + ".fileprovider",
+                        outFile
+                    )
+
+                    val shareIntent = Intent(Intent.ACTION_SEND).apply {
+                        type = "image/png"
+                        putExtra(Intent.EXTRA_STREAM, uriFile)
+                        putExtra(Intent.EXTRA_TEXT, paymentUri)
+                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    }
+                    context.startActivity(Intent.createChooser(shareIntent, "Share"))
+                }.onFailure {
+                    statusText = "Share failed: ${it.message ?: it.javaClass.simpleName}"
+                }
+            },
+            enabled = paymentUri.isNotBlank() && qrBitmap != null,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text("Share")
+        }
+
+        statusText?.let {
+            Spacer(Modifier.height(12.dp))
+            Text(it)
+        }
+    }
+
+    if (showCreatePrompt) {
+        AlertDialog(
+            onDismissRequest = { showCreatePrompt = false },
+            title = { Text("New address label") },
+            text = {
+                OutlinedTextField(
+                    value = newLabel,
+                    onValueChange = { newLabel = it },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                    placeholder = { Text("Optional label") }
+                )
+            },
+            confirmButton = {
+                Button(onClick = {
+                    val label = newLabel.trim()
+                    newLabel = ""
+                    showCreatePrompt = false
+                    scope.launch {
+                        runCatching {
+                            val created = walletManager.createReceiveSubaddress(label)
+                            refreshAddressBook()
+                            selectedSubaddressIndex = created.subaddressIndex
+                        }.onFailure {
+                            statusText = it.message ?: it.javaClass.simpleName
+                        }
+                    }
+                }) {
+                    Text("Create")
+                }
+            },
+            dismissButton = {
+                Button(onClick = {
+                    newLabel = ""
+                    showCreatePrompt = false
+                }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+}
+
+/**
  * Send screen: fee preview, send, and send max (sweep) using WalletManager.
  */
 @Composable
 private fun SendScreen(walletManager: WalletManager) {
     val scope = rememberCoroutineScope()
     val state by walletManager.state.collectAsState()
+    val context = LocalContext.current
 
     var toAddress by remember { mutableStateOf("") }
     var amountXmrText by remember { mutableStateOf("") }
-    var ringLenText by remember { mutableStateOf("16") }
-
-    var feePreviewText by remember { mutableStateOf("(none)") }
-    var sweepPreviewText by remember { mutableStateOf("(none)") }
-    var lastActionText by remember { mutableStateOf("(idle)") }
+    var isEstimating by remember { mutableStateOf(false) }
+    var isSending by remember { mutableStateOf(false) }
+    var isPreviewingMax by remember { mutableStateOf(false) }
+    var estimatedFee by remember { mutableStateOf<SendJson.FeeResult?>(null) }
+    var sweepPreview by remember { mutableStateOf<SendJson.SweepPreviewResult?>(null) }
+    var sendResult by remember { mutableStateOf<SendJson.SendResult?>(null) }
+    var sweepResult by remember { mutableStateOf<SendJson.SweepSendResult?>(null) }
     var errorText by remember { mutableStateOf<String?>(null) }
+    var infoText by remember { mutableStateOf<String?>(null) }
+
+    val unlockedXmr = state.balance?.unlockedXmr ?: "0.000000000000"
+    val hasWallet = !state.walletId.isNullOrBlank()
+
+    fun canPreviewFee(): Boolean = hasWallet && toAddress.trim().isNotEmpty() && amountXmrText.trim().isNotEmpty() && !isEstimating && !isSending
+    fun canSendExact(): Boolean = canPreviewFee() && estimatedFee != null
+    fun canSendMax(): Boolean = hasWallet && toAddress.trim().isNotEmpty() && !isEstimating && !isSending
+    fun totalWithFeeText(): String? {
+        val fee = estimatedFee ?: return null
+        val amount = runCatching { parseXmrToPiconero(amountXmrText) }.getOrNull() ?: return null
+        return XmrFormat.formatPiconeroAsXmr(amount + fee.fee)
+    }
 
     Column(modifier = Modifier.padding(16.dp)) {
         Text("Send")
         Spacer(Modifier.height(8.dp))
 
-        Text("walletId: ${state.walletId ?: "(none)"}")
-        Text("nodeUrl: ${state.nodeUrl ?: walletManager.defaultNodeUrl()}")
+        Text("Unlocked balance: $unlockedXmr XMR", color = Color.Gray)
         Spacer(Modifier.height(12.dp))
 
-        Text("To address:")
+        Text("To address")
         OutlinedTextField(
             value = toAddress,
-            onValueChange = { toAddress = it },
+            onValueChange = {
+                toAddress = it
+                estimatedFee = null
+                sweepPreview = null
+                sendResult = null
+                sweepResult = null
+                errorText = null
+                infoText = null
+            },
             singleLine = true,
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(bottom = 8.dp)
         )
 
-        Text("Amount (XMR):")
+        Text("Amount (XMR)")
         OutlinedTextField(
             value = amountXmrText,
-            onValueChange = { amountXmrText = it },
+            onValueChange = {
+                amountXmrText = it
+                estimatedFee = null
+                sendResult = null
+                sweepResult = null
+                errorText = null
+                infoText = null
+            },
             singleLine = true,
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(bottom = 8.dp)
-        )
-
-        Text("Ring length:")
-        OutlinedTextField(
-            value = ringLenText,
-            onValueChange = { ringLenText = it },
-            singleLine = true,
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(bottom = 12.dp)
         )
 
         val mergedError = errorText ?: state.lastError
         if (mergedError != null) {
-            Text("error: $mergedError")
+            Text(mergedError, color = Color(0xFFFF3B30))
             Spacer(Modifier.height(12.dp))
         }
 
-        Button(onClick = {
-            errorText = null
-            scope.launch {
-                try {
-                    val wid = state.walletId ?: throw IllegalStateException("No wallet open")
-                    val ringLen = ringLenText.toIntOrNull() ?: 16
-                    val amountPiconero = parseXmrToPiconero(amountXmrText)
+        infoText?.let {
+            Text(it)
+            Spacer(Modifier.height(12.dp))
+        }
 
-                    val fee = walletManager.previewFee(
-                        destinations = listOf(
-                            SendJson.Destination(
-                                address = toAddress.trim(),
-                                amount = amountPiconero
+        estimatedFee?.let { fee ->
+            Text("Estimated fee: ${fee.feeXmr} XMR")
+            totalWithFeeText()?.let { total ->
+                Text("Total (amount + fee): $total XMR", color = Color.Gray)
+            }
+            Spacer(Modifier.height(12.dp))
+        }
+
+        sweepPreview?.let { preview ->
+            Text("Send max amount: ${preview.amountXmr} XMR")
+            Text("Estimated fee: ${preview.feeXmr} XMR", color = Color.Gray)
+            Spacer(Modifier.height(12.dp))
+        }
+
+        sendResult?.let { result ->
+            Text("Sent", color = Color.Gray)
+            Text("TXID: ${result.txid}", fontFamily = FontFamily.Monospace)
+            Text("Fee: ${result.feeXmr} XMR")
+            Spacer(Modifier.height(12.dp))
+        }
+
+        sweepResult?.let { result ->
+            Text("Sent max", color = Color.Gray)
+            Text("TXID: ${result.txid}", fontFamily = FontFamily.Monospace)
+            Text("Amount: ${result.amountXmr} XMR")
+            Text("Fee: ${result.feeXmr} XMR")
+            Spacer(Modifier.height(12.dp))
+        }
+
+        Button(
+            onClick = {
+                errorText = null
+                infoText = null
+                sendResult = null
+                sweepResult = null
+                sweepPreview = null
+                scope.launch {
+                    isEstimating = true
+                    try {
+                        val amountPiconero = parseXmrToPiconero(amountXmrText)
+                        estimatedFee = walletManager.previewFee(
+                            destinations = listOf(
+                                SendJson.Destination(
+                                    address = toAddress.trim(),
+                                    amount = amountPiconero
+                                )
                             )
-                        ),
-                        ringLen = ringLen
-                    )
-
-                    feePreviewText = "fee=${fee.feeXmr} XMR"
-                    lastActionText = "Fee preview ok (walletId=$wid)"
-                } catch (t: Throwable) {
-                    errorText = t.message ?: t.javaClass.simpleName
+                        )
+                        infoText = "Fee estimated successfully."
+                    } catch (t: Throwable) {
+                        errorText = t.message ?: t.javaClass.simpleName
+                    } finally {
+                        isEstimating = false
+                    }
                 }
-            }
-        }) {
-            Text("Preview fee")
-        }
-
-        Spacer(Modifier.height(8.dp))
-        Text("Fee preview: $feePreviewText")
-
-        Spacer(Modifier.height(12.dp))
-
-        Button(onClick = {
-            errorText = null
-            scope.launch {
-                try {
-                    val wid = state.walletId ?: throw IllegalStateException("No wallet open")
-                    val ringLen = ringLenText.toIntOrNull() ?: 16
-                    val amountPiconero = parseXmrToPiconero(amountXmrText)
-
-                    val res = walletManager.send(
-                        toAddress = toAddress.trim(),
-                        amountPiconero = amountPiconero,
-                        ringLen = ringLen
-                    )
-
-                    lastActionText =
-                        "Sent tx=${res.txidShort()} fee=${res.feeXmr} XMR (walletId=$wid)"
-                } catch (t: Throwable) {
-                    errorText = t.message ?: t.javaClass.simpleName
-                }
-            }
-        }) {
-            Text("Send")
+            },
+            enabled = canPreviewFee(),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text(if (isEstimating) "Estimating..." else "Preview fee")
         }
 
         Spacer(Modifier.height(12.dp))
 
-        Button(onClick = {
-            errorText = null
-            scope.launch {
-                try {
-                    val wid = state.walletId ?: throw IllegalStateException("No wallet open")
-                    val ringLen = ringLenText.toIntOrNull() ?: 16
+        Button(
+            onClick = {
+                errorText = null
+                infoText = null
+                sendResult = null
+                sweepResult = null
+                scope.launch {
+                    isSending = true
+                    try {
+                        val amountPiconero = parseXmrToPiconero(amountXmrText)
 
-                    val prev = walletManager.previewSweep(
-                        toAddress = toAddress.trim(),
-                        ringLen = ringLen
-                    )
+                        if (MoneroConfig.requireDeviceAuth(context)) {
+                            val activity = context as? ComponentActivity
+                                ?: throw IllegalStateException("Device authentication requires an activity context")
+                            DeviceAuthGate.authenticate(
+                                activity = activity,
+                                title = "Confirm send",
+                                subtitle = "Authenticate to send Monero"
+                            )
+                        }
 
-                    sweepPreviewText =
-                        "amount=${prev.amountXmr} XMR fee=${prev.feeXmr} XMR"
-                    lastActionText = "Sweep preview ok (walletId=$wid)"
-                } catch (t: Throwable) {
-                    errorText = t.message ?: t.javaClass.simpleName
+                        sendResult = walletManager.send(
+                            toAddress = toAddress.trim(),
+                            amountPiconero = amountPiconero
+                        )
+                        infoText = "Transaction broadcast."
+                        walletManager.refreshWalletDataSnapshots()
+                    } catch (t: Throwable) {
+                        errorText = t.message ?: t.javaClass.simpleName
+                    } finally {
+                        isSending = false
+                    }
                 }
-            }
-        }) {
-            Text("Preview send max")
-        }
-
-        Spacer(Modifier.height(8.dp))
-        Text("Send max preview: $sweepPreviewText")
-
-        Spacer(Modifier.height(8.dp))
-
-        Button(onClick = {
-            errorText = null
-            scope.launch {
-                try {
-                    val wid = state.walletId ?: throw IllegalStateException("No wallet open")
-                    val ringLen = ringLenText.toIntOrNull() ?: 16
-
-                    val res = walletManager.sweep(
-                        toAddress = toAddress.trim(),
-                        ringLen = ringLen
-                    )
-
-                    lastActionText =
-                        "Swept tx=${res.txidShort()} amount=${res.amountXmr} XMR fee=${res.feeXmr} XMR (walletId=$wid)"
-                } catch (t: Throwable) {
-                    errorText = t.message ?: t.javaClass.simpleName
-                }
-            }
-        }) {
-            Text("Send max")
+            },
+            enabled = canSendExact(),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text(if (isSending) "Sending..." else "Send")
         }
 
         Spacer(Modifier.height(12.dp))
-        Text(lastActionText)
+
+        Button(
+            onClick = {
+                errorText = null
+                infoText = null
+                sendResult = null
+                sweepResult = null
+                estimatedFee = null
+                scope.launch {
+                    isPreviewingMax = true
+                    try {
+                        sweepPreview = walletManager.previewSweep(toAddress = toAddress.trim())
+                        infoText = "Maximum sendable amount estimated."
+                    } catch (t: Throwable) {
+                        errorText = t.message ?: t.javaClass.simpleName
+                    } finally {
+                        isPreviewingMax = false
+                    }
+                }
+            },
+            enabled = canSendMax(),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text(if (isPreviewingMax) "Estimating max..." else "Preview send max")
+        }
+
+        Spacer(Modifier.height(12.dp))
+
+        Button(
+            onClick = {
+                errorText = null
+                infoText = null
+                sendResult = null
+                scope.launch {
+                    isSending = true
+                    try {
+                        if (MoneroConfig.requireDeviceAuth(context)) {
+                            val activity = context as? ComponentActivity
+                                ?: throw IllegalStateException("Device authentication requires an activity context")
+                            DeviceAuthGate.authenticate(
+                                activity = activity,
+                                title = "Confirm send max",
+                                subtitle = "Authenticate to sweep the wallet balance"
+                            )
+                        }
+
+                        sweepResult = walletManager.sweep(toAddress = toAddress.trim())
+                        infoText = "Maximum spendable balance broadcast."
+                        walletManager.refreshWalletDataSnapshots()
+                    } catch (t: Throwable) {
+                        errorText = t.message ?: t.javaClass.simpleName
+                    } finally {
+                        isSending = false
+                    }
+                }
+            },
+            enabled = canSendMax(),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text(if (isSending) "Sending..." else "Send max")
+        }
     }
 }
 
@@ -1078,13 +1280,10 @@ private fun SettingsScreen(walletManager: WalletManager) {
     var accountGapError by remember { mutableStateOf<String?>(null) }
 
     var statusText by remember { mutableStateOf<String?>(null) }
-
-    // Debug snapshot (best-effort, for parity troubleshooting).
-    val sync = state.syncStatus
-    val cacheInfo = state.cacheInfo
-    val coreErr = runCatching { WalletCore.lastErrorMessage() }.getOrNull()
-    val derivedAddr = state.walletAddress
-    val tipKnown = sync != null && sync.chainHeight > sync.restoreHeight
+    var requireDeviceAuth by remember {
+        mutableStateOf(MoneroConfig.requireDeviceAuth(context))
+    }
+    var showAdvancedRecovery by remember { mutableStateOf(false) }
 
     Column(modifier = Modifier.padding(16.dp)) {
         Text("Settings")
@@ -1124,49 +1323,40 @@ private fun SettingsScreen(walletManager: WalletManager) {
 
         Spacer(Modifier.height(16.dp))
 
-        Text("Scan tuning (iOS parity)", color = Color.Gray)
+        Row(modifier = Modifier.fillMaxWidth()) {
+            Text(
+                "Require device auth for wallet unlock and send",
+                modifier = Modifier.weight(1f)
+            )
+            Switch(
+                checked = requireDeviceAuth,
+                onCheckedChange = {
+                    requireDeviceAuth = it
+                    MoneroConfig.setRequireDeviceAuth(context, it)
+                    statusText = if (it) {
+                        "Enabled device auth"
+                    } else {
+                        "Disabled device auth"
+                    }
+                }
+            )
+        }
+
+        Text(
+            if (DeviceAuthGate.isAvailable(context)) {
+                "Biometric or device credential authentication is available on this device."
+            } else {
+                "Biometric or device credential authentication is not currently available on this device."
+            },
+            color = Color.Gray
+        )
+
+        Spacer(Modifier.height(16.dp))
+
+        Text("Restore & Rescan", color = Color.Gray)
         Spacer(Modifier.height(8.dp))
 
-        Text("Gap limit (subaddresses per account)")
-        OutlinedTextField(
-            value = gapLimitInput,
-            onValueChange = {
-                gapLimitInput = it
-                gapLimitError = null
-                statusText = null
-            },
-            singleLine = true,
-            modifier = Modifier.fillMaxWidth(),
-            isError = gapLimitError != null,
-            keyboardOptions = KeyboardOptions.Default.copy(keyboardType = KeyboardType.Number),
-            placeholder = { Text(MoneroConfig.DEFAULT_GAP_LIMIT.toString()) }
-        )
-        Text(
-            gapLimitError ?: "Valid range: 1..100000 (default ${MoneroConfig.DEFAULT_GAP_LIMIT})",
-            color = if (gapLimitError != null) Color(0xFFFF3B30) else Color.Gray
-        )
-
-        Spacer(Modifier.height(8.dp))
-
-        Text("Accounts (lookahead)")
-        OutlinedTextField(
-            value = accountGapInput,
-            onValueChange = {
-                accountGapInput = it
-                accountGapError = null
-                statusText = null
-            },
-            singleLine = true,
-            modifier = Modifier.fillMaxWidth(),
-            isError = accountGapError != null,
-            keyboardOptions = KeyboardOptions.Default.copy(keyboardType = KeyboardType.Number),
-            placeholder = { Text(MoneroConfig.DEFAULT_ACCOUNT_GAP.toString()) }
-        )
-        Text(
-            accountGapError ?: "Valid range: 1..1000 (default ${MoneroConfig.DEFAULT_ACCOUNT_GAP})",
-            color = if (accountGapError != null) Color(0xFFFF3B30) else Color.Gray
-        )
-
+        Text("Use an earlier height if funds are missing after import, or rescan from 0 if you need a full recovery.")
         Spacer(Modifier.height(8.dp))
 
         Button(
@@ -1189,102 +1379,104 @@ private fun SettingsScreen(walletManager: WalletManager) {
                             return@launch
                         }
 
-                        // Clamp exactly like MoneroConfig does (iOS parity).
                         val glClamped = glRaw.coerceIn(1, 100_000)
                         val agClamped = agRaw.coerceIn(1, 1_000)
 
-                        // If we had to clamp, update the text fields so the UI reflects what we saved.
                         if (glClamped != glRaw) gapLimitInput = glClamped.toString()
                         if (agClamped != agRaw) accountGapInput = agClamped.toString()
 
                         MoneroConfig.setGapLimit(context, glClamped)
                         MoneroConfig.setAccountGap(context, agClamped)
 
-                        // Best-effort: apply immediately if a wallet is open.
-                        // Refresh will also re-apply at start.
                         val wid = state.walletId
                         if (!wid.isNullOrBlank()) {
                             runCatching { WalletCore.setGapLimit(wid, MoneroConfig.gapLimit(context)) }
                             runCatching { WalletCore.setAccountGap(MoneroConfig.accountGap(context)) }
                         }
 
-                        statusText = "Saved scan tuning"
+                        statusText = "Saved recovery scan settings"
                     } catch (t: Throwable) {
-                        statusText = "Failed to save scan tuning: ${t.message ?: t.javaClass.simpleName}"
+                        statusText = "Failed to save recovery scan settings: ${t.message ?: t.javaClass.simpleName}"
                     }
                 }
             },
             modifier = Modifier.fillMaxWidth()
         ) {
-            Text("Save scan tuning")
-        }
-
-        Spacer(Modifier.height(8.dp))
-
-        Text(
-            "Effective gapLimit=${MoneroConfig.gapLimit(context)} accountGap=${MoneroConfig.accountGap(context)}",
-            color = Color.Gray
-        )
-
-        statusText?.let {
-            Spacer(Modifier.height(8.dp))
-            Text(it)
+            Text("Apply restore/recovery settings")
         }
 
         Spacer(Modifier.height(16.dp))
 
-        Text("Debug", color = Color.Gray)
-        Spacer(Modifier.height(8.dp))
-
-        // Derived primary address (parity troubleshooting).
-        Text("Derived address", color = Color.Gray)
-        SelectionContainer {
+        Row(modifier = Modifier.fillMaxWidth()) {
             Text(
-                derivedAddr ?: "(none)",
-                fontFamily = FontFamily.Monospace,
+                "Advanced recovery",
+                modifier = Modifier.weight(1f)
+            )
+            Button(onClick = { showAdvancedRecovery = !showAdvancedRecovery }) {
+                Text(if (showAdvancedRecovery) "Hide" else "Show")
+            }
+        }
+
+        if (showAdvancedRecovery) {
+            Spacer(Modifier.height(8.dp))
+            Text(
+                "Only change these values if a wallet import appears incomplete after using the correct restore height.",
+                color = Color.Gray
+            )
+
+            Spacer(Modifier.height(8.dp))
+
+            Text("Gap limit (subaddresses per account)")
+            OutlinedTextField(
+                value = gapLimitInput,
+                onValueChange = {
+                    gapLimitInput = it
+                    gapLimitError = null
+                    statusText = null
+                },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+                isError = gapLimitError != null,
+                keyboardOptions = KeyboardOptions.Default.copy(keyboardType = KeyboardType.Number),
+                placeholder = { Text(MoneroConfig.DEFAULT_GAP_LIMIT.toString()) }
+            )
+            Text(
+                gapLimitError ?: "Valid range: 1..100000 (default ${MoneroConfig.DEFAULT_GAP_LIMIT})",
+                color = if (gapLimitError != null) Color(0xFFFF3B30) else Color.Gray
+            )
+
+            Spacer(Modifier.height(8.dp))
+
+            Text("Accounts (lookahead)")
+            OutlinedTextField(
+                value = accountGapInput,
+                onValueChange = {
+                    accountGapInput = it
+                    accountGapError = null
+                    statusText = null
+                },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+                isError = accountGapError != null,
+                keyboardOptions = KeyboardOptions.Default.copy(keyboardType = KeyboardType.Number),
+                placeholder = { Text(MoneroConfig.DEFAULT_ACCOUNT_GAP.toString()) }
+            )
+            Text(
+                accountGapError ?: "Valid range: 1..1000 (default ${MoneroConfig.DEFAULT_ACCOUNT_GAP})",
+                color = if (accountGapError != null) Color(0xFFFF3B30) else Color.Gray
+            )
+
+            Spacer(Modifier.height(8.dp))
+
+            Text(
+                "Effective gapLimit=${MoneroConfig.gapLimit(context)} accountGap=${MoneroConfig.accountGap(context)}",
+                color = Color.Gray
             )
         }
 
-        Spacer(Modifier.height(8.dp))
-
-        Button(
-            onClick = {
-                statusText = null
-                walletManager.recomputeDerivedAddressFromStoredMetadata()
-                statusText = "Requested address recompute"
-            },
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Text("Recompute derived address")
-        }
-
-        Spacer(Modifier.height(8.dp))
-
-        // Sync status snapshot
-        Text("Sync status", color = Color.Gray)
-        Text(
-            "chainHeight=${sync?.chainHeight ?: 0} lastScanned=${sync?.lastScanned ?: 0} restoreHeight=${sync?.restoreHeight ?: 0} tipKnown=$tipKnown",
-            fontFamily = FontFamily.Monospace
-        )
-
-        Spacer(Modifier.height(8.dp))
-
-        // Cache info snapshot
-        Text("Cache", color = Color.Gray)
-        Text(
-            "path=${cacheInfo?.filePath ?: "(none)"} bytes=${cacheInfo?.bytesOnDisk ?: 0} savedAtMs=${cacheInfo?.lastSavedAtMs ?: 0}",
-            fontFamily = FontFamily.Monospace
-        )
-
-        Spacer(Modifier.height(8.dp))
-
-        // Core error state
-        Text("Core last error", color = Color.Gray)
-        SelectionContainer {
-            Text(
-                coreErr ?: "<null>",
-                fontFamily = FontFamily.Monospace
-            )
+        statusText?.let {
+            Spacer(Modifier.height(8.dp))
+            Text(it)
         }
     }
 }

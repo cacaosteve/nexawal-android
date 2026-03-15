@@ -30,8 +30,30 @@ class MainActivity : ComponentActivity() {
                     // Load persisted app settings (e.g., node URL) before loading/opening any stored wallet.
                     walletManager.loadSettingsOnLaunch()
 
-                    // If a stored wallet exists, open it and start refresh automatically (WalletManager handles that).
-                    walletManager.loadStoredWalletOnLaunch()
+                    // If a stored wallet exists, open it and start refresh automatically.
+                    // When enabled, require device authentication first.
+                    val hasStoredWallet = runCatching { walletManager.hasStoredWallet() }.getOrDefault(false)
+                    if (hasStoredWallet) {
+                        val shouldRequireAuth = MoneroConfig.requireDeviceAuth(applicationContext)
+                        val unlocked = if (!shouldRequireAuth || !DeviceAuthGate.isAvailable(applicationContext)) {
+                            true
+                        } else {
+                            runCatching {
+                                DeviceAuthGate.authenticate(
+                                    activity = this@MainActivity,
+                                    title = "Unlock wallet",
+                                    subtitle = "Authenticate to open the stored Monero wallet"
+                                )
+                            }.isSuccess
+                        }
+
+                        if (unlocked) {
+                            val loaded = walletManager.loadStoredWalletOnLaunch()
+                            if (loaded) {
+                                runCatching { walletManager.refreshWallet() }
+                            }
+                        }
+                    }
                 }
 
                 // iOS parity:

@@ -1,6 +1,9 @@
 #include <jni.h>
 #include <string>
 #include <vector>
+#include <cstdlib>
+#include <dlfcn.h>
+#include <android/log.h>
 
 #include "monerowalletcore.h"
 
@@ -14,6 +17,14 @@ static jstring cstr_to_jstring_and_free(JNIEnv* env, char* cstr) {
     // Always free Rust-allocated string.
     walletcore_free_cstr(cstr);
     return js;
+}
+
+static void wc_logi(const std::string& msg) {
+    __android_log_write(4 /* ANDROID_LOG_INFO */, "walletcore-jni", msg.c_str());
+}
+
+static void wc_logw(const std::string& msg) {
+    __android_log_write(5 /* ANDROID_LOG_WARN */, "walletcore-jni", msg.c_str());
 }
 
 static std::string jstring_to_std_string(JNIEnv* env, jstring s) {
@@ -69,6 +80,34 @@ Java_com_nexatrode_nexawal_walletcore_WalletCoreJni_version(JNIEnv* env, jclass 
     return cstr_to_jstring_and_free(env, ver);
 }
 
+JNIEXPORT jstring JNICALL
+Java_com_nexatrode_nexawal_walletcore_WalletCoreJni_generateMnemonicEnglish(JNIEnv* env, jclass /*clazz*/) {
+    using wallet_generate_mnemonic_english_fn = int32_t (*)(char*, size_t, size_t*);
+    auto* fn = reinterpret_cast<wallet_generate_mnemonic_english_fn>(
+        dlsym(RTLD_DEFAULT, "wallet_generate_mnemonic_english")
+    );
+    if (fn == nullptr) {
+        jclass exCls = env->FindClass("java/lang/UnsupportedOperationException");
+        if (exCls != nullptr) {
+            env->ThrowNew(exCls, "wallet_generate_mnemonic_english is not exported by this Android wallet core build");
+        }
+        return nullptr;
+    }
+
+    std::vector<char> buf(512, 0);
+    size_t written = 0;
+    int32_t rc = fn(buf.data(), static_cast<size_t>(buf.size()), &written);
+    if (!check_rc_or_throw(env, rc, "wallet_generate_mnemonic_english")) {
+        return nullptr;
+    }
+    if (written == 0) {
+        throw_walletcore_exception(env, "wallet_generate_mnemonic_english", -1);
+        return nullptr;
+    }
+    buf[buf.size() - 1] = '\0';
+    return env->NewStringUTF(buf.data());
+}
+
 // Kotlin/Java signature:
 //   internal object WalletCoreJni { external fun lastErrorMessage(): String? }
 // Returns: core last error message as UTF-8 string, or null if none.
@@ -95,33 +134,14 @@ Java_com_nexatrode_nexawal_walletcore_WalletCoreJni_primaryAddressFromMnemonic(
     const std::string m = jstring_to_std_string(env, mnemonic);
     const uint8_t is_mainnet = mainnet ? 1 : 0;
 
-    // Two-phase buffer API (like many C ABIs):
-    // 1) Call with out_buf = NULL to probe required size
-    // 2) Allocate buffer and call again
-    size_t required = 0;
-    int32_t rc_probe = wallet_primary_address_from_mnemonic(
-        m.c_str(),
-        is_mainnet,
-        nullptr,
-        0,
-        &required
-    );
-
-    // Some implementations may return a non-zero rc for "buffer too small"; in this ABI we expect rc==0
-    // and required populated. If rc!=0, surface it as an exception.
-    if (!check_rc_or_throw(env, rc_probe, "wallet_primary_address_from_mnemonic probe")) {
-        return nullptr;
-    }
-
-    if (required == 0) {
-        throw_walletcore_exception(env, "wallet_primary_address_from_mnemonic", -1);
-        return nullptr;
-    }
-
-    std::vector<char> buf(required + 1, 0);
+    // Match iOS behavior (MoneroWalletCoreFFI.swift):
+    // - Do NOT probe required size for wallet_primary_address_from_mnemonic.
+    // - Call once with a fixed-size buffer that is large enough for Monero addresses.
+    // iOS uses 192 bytes; we mirror that here for parity.
+    std::vector<char> buf(192, 0);
     size_t written = 0;
 
-    int32_t rc_fill = wallet_primary_address_from_mnemonic(
+    int32_t rc = wallet_primary_address_from_mnemonic(
         m.c_str(),
         is_mainnet,
         buf.data(),
@@ -129,11 +149,88 @@ Java_com_nexatrode_nexawal_walletcore_WalletCoreJni_primaryAddressFromMnemonic(
         &written
     );
 
-    if (!check_rc_or_throw(env, rc_fill, "wallet_primary_address_from_mnemonic fill")) {
+    wc_logi(
+        "primaryAddressFromMnemonic single-call rc=" + std::to_string(rc) +
+        " written=" + std::to_string(written) +
+        " buf_cap=" + std::to_string(buf.size()) +
+        " mainnet=" + std::to_string(static_cast<int>(is_mainnet)) +
+        " mnemonic_len=" + std::to_string(m.size())
+    );
+
+    if (!check_rc_or_throw(env, rc, "wallet_primary_address_from_mnemonic")) {
         return nullptr;
     }
 
-    // Ensure NUL termination
+    if (written == 0) {
+        char* err = walletcore_last_error_message();
+        std::string msg = "wallet_primary_address_from_mnemonic wrote 0 bytes";
+        if (err != nullptr) {
+            msg += ": ";
+            msg += err;
+            walletcore_free_cstr(err);
+        }
+        wc_logw(msg);
+
+        jclass exCls = env->FindClass("java/lang/RuntimeException");
+        if (exCls != nullptr) {
+            env->ThrowNew(exCls, msg.c_str());
+        }
+        return nullptr;
+    }
+
+    // Ensure NUL termination (defensive).
+    buf[buf.size() - 1] = '\0';
+    return env->NewStringUTF(buf.data());
+}
+
+// Kotlin/Java signature:
+//   internal object WalletCoreJni { external fun subaddressFromMnemonic(mnemonic: String, accountIndex: Int, subaddressIndex: Int, mainnet: Boolean): String }
+JNIEXPORT jstring JNICALL
+Java_com_nexatrode_nexawal_walletcore_WalletCoreJni_subaddressFromMnemonic(
+    JNIEnv* env,
+    jclass /*clazz*/,
+    jstring mnemonic,
+    jint accountIndex,
+    jint subaddressIndex,
+    jboolean mainnet
+) {
+    const std::string m = jstring_to_std_string(env, mnemonic);
+    const uint32_t account_index = static_cast<uint32_t>(accountIndex < 0 ? 0 : accountIndex);
+    const uint32_t subaddress_index = static_cast<uint32_t>(subaddressIndex < 0 ? 0 : subaddressIndex);
+    const uint8_t is_mainnet = mainnet ? 1 : 0;
+
+    std::vector<char> buf(192, 0);
+    size_t written = 0;
+
+    int32_t rc = wallet_derive_subaddress_from_mnemonic(
+        m.c_str(),
+        account_index,
+        subaddress_index,
+        is_mainnet,
+        buf.data(),
+        static_cast<size_t>(buf.size()),
+        &written
+    );
+
+    if (!check_rc_or_throw(env, rc, "wallet_derive_subaddress_from_mnemonic")) {
+        return nullptr;
+    }
+
+    if (written == 0) {
+        char* err = walletcore_last_error_message();
+        std::string msg = "wallet_derive_subaddress_from_mnemonic wrote 0 bytes";
+        if (err != nullptr) {
+            msg += ": ";
+            msg += err;
+            walletcore_free_cstr(err);
+        }
+        jclass exCls = env->FindClass("java/lang/RuntimeException");
+        if (exCls != nullptr) {
+            env->ThrowNew(exCls, msg.c_str());
+        }
+        return nullptr;
+    }
+
     buf[buf.size() - 1] = '\0';
     return env->NewStringUTF(buf.data());
 }
@@ -213,12 +310,72 @@ Java_com_nexatrode_nexawal_walletcore_WalletCoreJni_refresh(
 
     const char* url_ptr = nodeUrl == nullptr ? nullptr : url.c_str();
 
-    uint64_t last_scanned = 0;
-    int32_t rc = wallet_refresh(wid.c_str(), url_ptr, &last_scanned);
+    uint64_t out_last_scanned = 0;
+    int32_t rc = wallet_refresh(wid.c_str(), url_ptr, &out_last_scanned);
     if (!check_rc_or_throw(env, rc, "wallet_refresh")) {
-        return static_cast<jlong>(0);
+        return 0;
     }
-    return static_cast<jlong>(last_scanned);
+    return static_cast<jlong>(out_last_scanned);
+}
+
+// Kotlin/Java signature:
+//   internal object WalletCoreJni { external fun setGapLimit(walletId: String, gapLimit: Int) }
+// Calls:
+//   int32_t wallet_set_gap_limit(const char* wallet_id, uint32_t gap_limit)
+JNIEXPORT void JNICALL
+Java_com_nexatrode_nexawal_walletcore_WalletCoreJni_setGapLimit(
+    JNIEnv* env,
+    jclass /*clazz*/,
+    jstring walletId,
+    jint gapLimit
+) {
+    const std::string wid = jstring_to_std_string(env, walletId);
+    uint32_t gl = static_cast<uint32_t>(gapLimit < 0 ? 0 : gapLimit);
+
+    int32_t rc = wallet_set_gap_limit(wid.c_str(), gl);
+    (void)check_rc_or_throw(env, rc, "wallet_set_gap_limit");
+}
+
+// Kotlin/Java signature:
+//   internal object WalletCoreJni { external fun setEnv(key: String, value: String) }
+// Notes:
+// - Best-effort; throws RuntimeException on failure.
+// - Used to set WALLETCORE_ACCOUNT_GAP (account lookahead) like iOS does.
+JNIEXPORT void JNICALL
+Java_com_nexatrode_nexawal_walletcore_WalletCoreJni_setEnv(
+    JNIEnv* env,
+    jclass /*clazz*/,
+    jstring key,
+    jstring value
+) {
+    const std::string k = jstring_to_std_string(env, key);
+    const std::string v = jstring_to_std_string(env, value);
+
+    if (k.empty()) {
+        jclass exCls = env->FindClass("java/lang/IllegalArgumentException");
+        if (exCls != nullptr) {
+            env->ThrowNew(exCls, "setEnv: key must not be empty");
+        }
+        return;
+    }
+
+#if defined(_WIN32)
+    // Not expected on Android; keep for completeness.
+    int rc = _putenv_s(k.c_str(), v.c_str());
+    if (rc != 0) {
+        throw_walletcore_exception(env, "setEnv failed", rc);
+    }
+#else
+    // overwrite=1 to match iOS behavior (setenv(..., 1)).
+    int rc = ::setenv(k.c_str(), v.c_str(), 1);
+    if (rc != 0) {
+        // errno details aren't surfaced here; caller can inspect core lastError separately if needed.
+        jclass exCls = env->FindClass("java/lang/RuntimeException");
+        if (exCls != nullptr) {
+            env->ThrowNew(exCls, "setEnv failed");
+        }
+    }
+#endif
 }
 
 // Kotlin/Java signature:
@@ -330,12 +487,17 @@ Java_com_nexatrode_nexawal_walletcore_WalletCoreJni_exportCache(
         &required
     );
 
-    if (!check_rc_or_throw(env, rc_probe, "wallet_export_cache probe")) {
+    // NOTE: wallet_export_cache uses a two-phase API:
+    // - Probe call returns -12 ("buffer too small") but sets `required` to the needed size.
+    // Treat rc_probe == 0 OR rc_probe == -12 as success for the probe phase.
+    if (!(rc_probe == 0 || rc_probe == -12)) {
+        // Surface detailed core error as exception.
+        (void)check_rc_or_throw(env, rc_probe, "wallet_export_cache probe");
         return nullptr;
     }
 
     if (required == 0) {
-        // No cache available yet
+        // No cache available yet (or probe failed to report size).
         return nullptr;
     }
 
@@ -394,6 +556,34 @@ Java_com_nexatrode_nexawal_walletcore_WalletCoreJni_getBalance(
     return arr;
 }
 
+JNIEXPORT jlongArray JNICALL
+Java_com_nexatrode_nexawal_walletcore_WalletCoreJni_getBalanceWithFilter(
+    JNIEnv* env,
+    jclass /*clazz*/,
+    jstring walletId,
+    jstring filterJson
+) {
+    const std::string wid = jstring_to_std_string(env, walletId);
+    const std::string filter = jstring_to_std_string(env, filterJson);
+    const char* filter_ptr = filterJson == nullptr ? nullptr : filter.c_str();
+
+    uint64_t total = 0;
+    uint64_t unlocked = 0;
+    int32_t rc = wallet_get_balance_with_filter(wid.c_str(), filter_ptr, &total, &unlocked);
+    if (!check_rc_or_throw(env, rc, "wallet_get_balance_with_filter")) {
+        return nullptr;
+    }
+
+    jlongArray arr = env->NewLongArray(2);
+    if (arr == nullptr) return nullptr;
+
+    jlong vals[2];
+    vals[0] = static_cast<jlong>(total);
+    vals[1] = static_cast<jlong>(unlocked);
+    env->SetLongArrayRegion(arr, 0, 2, vals);
+    return arr;
+}
+
 // Kotlin/Java signature:
 //   internal object WalletCoreJni { external fun listTransfersJson(walletId: String): String }
 JNIEXPORT jstring JNICALL
@@ -445,6 +635,38 @@ Java_com_nexatrode_nexawal_walletcore_WalletCoreJni_previewFee(
     return cstr_to_jstring_and_free(env, json);
 }
 
+JNIEXPORT jstring JNICALL
+Java_com_nexatrode_nexawal_walletcore_WalletCoreJni_previewFeeWithFilter(
+    JNIEnv* env,
+    jclass /*clazz*/,
+    jstring walletId,
+    jstring nodeUrl,
+    jstring destinationsJson,
+    jstring filterJson,
+    jint ringLen
+) {
+    const std::string wid = jstring_to_std_string(env, walletId);
+    const std::string url = jstring_to_std_string(env, nodeUrl);
+    const std::string dests = jstring_to_std_string(env, destinationsJson);
+    const std::string filter = jstring_to_std_string(env, filterJson);
+
+    const char* url_ptr = nodeUrl == nullptr ? nullptr : url.c_str();
+    const char* filter_ptr = filterJson == nullptr ? nullptr : filter.c_str();
+
+    char* json = wallet_preview_fee_with_filter(
+        wid.c_str(),
+        url_ptr,
+        dests.c_str(),
+        filter_ptr,
+        static_cast<uint8_t>(ringLen)
+    );
+    if (json == nullptr) {
+        throw_walletcore_exception(env, "wallet_preview_fee_with_filter", -1);
+        return nullptr;
+    }
+    return cstr_to_jstring_and_free(env, json);
+}
+
 // Kotlin/Java signature:
 //   internal object WalletCoreJni { external fun send(walletId: String, nodeUrl: String?, toAddress: String, amountPiconero: Long, ringLen: Int): String }
 JNIEXPORT jstring JNICALL
@@ -473,6 +695,38 @@ Java_com_nexatrode_nexawal_walletcore_WalletCoreJni_send(
 
     if (json == nullptr) {
         throw_walletcore_exception(env, "wallet_send", -1);
+        return nullptr;
+    }
+    return cstr_to_jstring_and_free(env, json);
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_nexatrode_nexawal_walletcore_WalletCoreJni_sendWithFilter(
+    JNIEnv* env,
+    jclass /*clazz*/,
+    jstring walletId,
+    jstring nodeUrl,
+    jstring destinationsJson,
+    jstring filterJson,
+    jint ringLen
+) {
+    const std::string wid = jstring_to_std_string(env, walletId);
+    const std::string url = jstring_to_std_string(env, nodeUrl);
+    const std::string dests = jstring_to_std_string(env, destinationsJson);
+    const std::string filter = jstring_to_std_string(env, filterJson);
+
+    const char* url_ptr = nodeUrl == nullptr ? nullptr : url.c_str();
+    const char* filter_ptr = filterJson == nullptr ? nullptr : filter.c_str();
+
+    char* json = wallet_send_with_filter(
+        wid.c_str(),
+        url_ptr,
+        dests.c_str(),
+        filter_ptr,
+        static_cast<uint8_t>(ringLen)
+    );
+    if (json == nullptr) {
+        throw_walletcore_exception(env, "wallet_send_with_filter", -1);
         return nullptr;
     }
     return cstr_to_jstring_and_free(env, json);
@@ -509,6 +763,38 @@ Java_com_nexatrode_nexawal_walletcore_WalletCoreJni_previewSweep(
     return cstr_to_jstring_and_free(env, json);
 }
 
+JNIEXPORT jstring JNICALL
+Java_com_nexatrode_nexawal_walletcore_WalletCoreJni_previewSweepWithFilter(
+    JNIEnv* env,
+    jclass /*clazz*/,
+    jstring walletId,
+    jstring nodeUrl,
+    jstring toAddress,
+    jstring filterJson,
+    jint ringLen
+) {
+    const std::string wid = jstring_to_std_string(env, walletId);
+    const std::string url = jstring_to_std_string(env, nodeUrl);
+    const std::string addr = jstring_to_std_string(env, toAddress);
+    const std::string filter = jstring_to_std_string(env, filterJson);
+
+    const char* url_ptr = nodeUrl == nullptr ? nullptr : url.c_str();
+    const char* filter_ptr = filterJson == nullptr ? nullptr : filter.c_str();
+
+    char* json = wallet_preview_sweep_with_filter(
+        wid.c_str(),
+        url_ptr,
+        addr.c_str(),
+        filter_ptr,
+        static_cast<uint8_t>(ringLen)
+    );
+    if (json == nullptr) {
+        throw_walletcore_exception(env, "wallet_preview_sweep_with_filter", -1);
+        return nullptr;
+    }
+    return cstr_to_jstring_and_free(env, json);
+}
+
 // Kotlin/Java signature:
 //   internal object WalletCoreJni { external fun sweep(walletId: String, nodeUrl: String?, toAddress: String, ringLen: Int): String }
 JNIEXPORT jstring JNICALL
@@ -538,6 +824,94 @@ Java_com_nexatrode_nexawal_walletcore_WalletCoreJni_sweep(
         return nullptr;
     }
     return cstr_to_jstring_and_free(env, json);
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_nexatrode_nexawal_walletcore_WalletCoreJni_sweepWithFilter(
+    JNIEnv* env,
+    jclass /*clazz*/,
+    jstring walletId,
+    jstring nodeUrl,
+    jstring toAddress,
+    jstring filterJson,
+    jint ringLen
+) {
+    const std::string wid = jstring_to_std_string(env, walletId);
+    const std::string url = jstring_to_std_string(env, nodeUrl);
+    const std::string addr = jstring_to_std_string(env, toAddress);
+    const std::string filter = jstring_to_std_string(env, filterJson);
+
+    const char* url_ptr = nodeUrl == nullptr ? nullptr : url.c_str();
+    const char* filter_ptr = filterJson == nullptr ? nullptr : filter.c_str();
+
+    char* json = wallet_sweep_with_filter(
+        wid.c_str(),
+        url_ptr,
+        addr.c_str(),
+        filter_ptr,
+        static_cast<uint8_t>(ringLen)
+    );
+    if (json == nullptr) {
+        throw_walletcore_exception(env, "wallet_sweep_with_filter", -1);
+        return nullptr;
+    }
+    return cstr_to_jstring_and_free(env, json);
+}
+
+JNIEXPORT void JNICALL
+Java_com_nexatrode_nexawal_walletcore_WalletCoreJni_forceRescanFromHeight(
+    JNIEnv* env,
+    jclass /*clazz*/,
+    jstring walletId,
+    jlong fromHeight
+) {
+    const std::string wid = jstring_to_std_string(env, walletId);
+    int32_t rc = wallet_force_rescan_from_height(wid.c_str(), static_cast<uint64_t>(fromHeight));
+    (void)check_rc_or_throw(env, rc, "wallet_force_rescan_from_height");
+}
+
+JNIEXPORT void JNICALL
+Java_com_nexatrode_nexawal_walletcore_WalletCoreJni_resetTrackedOutputs(
+    JNIEnv* env,
+    jclass /*clazz*/,
+    jstring walletId
+) {
+    const std::string wid = jstring_to_std_string(env, walletId);
+    int32_t rc = wallet_reset_tracked_outputs(wid.c_str());
+    (void)check_rc_or_throw(env, rc, "wallet_reset_tracked_outputs");
+}
+
+JNIEXPORT void JNICALL
+Java_com_nexatrode_nexawal_walletcore_WalletCoreJni_startZmqListener(
+    JNIEnv* env,
+    jclass /*clazz*/,
+    jstring endpoint
+) {
+    const std::string ep = jstring_to_std_string(env, endpoint);
+    int32_t rc = wallet_start_zmq_listener(ep.c_str());
+    (void)check_rc_or_throw(env, rc, "wallet_start_zmq_listener");
+}
+
+JNIEXPORT void JNICALL
+Java_com_nexatrode_nexawal_walletcore_WalletCoreJni_stopZmqListener(
+    JNIEnv* env,
+    jclass /*clazz*/
+) {
+    int32_t rc = wallet_stop_zmq_listener();
+    (void)check_rc_or_throw(env, rc, "wallet_stop_zmq_listener");
+}
+
+JNIEXPORT jlong JNICALL
+Java_com_nexatrode_nexawal_walletcore_WalletCoreJni_zmqSequence(
+    JNIEnv* env,
+    jclass /*clazz*/
+) {
+    uint64_t out_sequence = 0;
+    int32_t rc = wallet_zmq_sequence(&out_sequence);
+    if (!check_rc_or_throw(env, rc, "wallet_zmq_sequence")) {
+        return 0;
+    }
+    return static_cast<jlong>(out_sequence);
 }
 
 } // extern "C"

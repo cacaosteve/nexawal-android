@@ -1,5 +1,6 @@
 package com.nexatrode.nexawal.ui
 
+import androidx.activity.ComponentActivity
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -31,9 +32,12 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import com.nexatrode.nexawal.DeviceAuthGate
+import com.nexatrode.nexawal.MoneroConfig
 import com.nexatrode.nexawal.WalletManager
 import kotlinx.coroutines.launch
 
@@ -54,7 +58,6 @@ private enum class WalletSetupMode { CREATE, IMPORT }
  *
  * Notes:
  * - Suggested restore height uses a very small HTTP call to the configured node's `/get_info`.
- * - Mnemonic persistence is currently dev-only plaintext via WalletManager (see its SECURITY NOTE).
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -65,6 +68,7 @@ fun WalletCreationScreen(
     val scope = rememberCoroutineScope()
     val state by walletManager.state.collectAsState()
     val scroll = rememberScrollState()
+    val context = LocalContext.current
 
     // UI state
     val modeIndex = remember { mutableIntStateOf(1) } // default to IMPORT like iOS
@@ -168,6 +172,34 @@ fun WalletCreationScreen(
         }
     }
 
+    fun unlockStoredWallet() {
+        errorText.value = null
+        isLoading.value = true
+
+        scope.launch {
+            try {
+                if (MoneroConfig.requireDeviceAuth(context) && DeviceAuthGate.isAvailable(context)) {
+                    val activity = context as? ComponentActivity
+                        ?: throw IllegalStateException("Device authentication requires an activity context")
+                    DeviceAuthGate.authenticate(
+                        activity = activity,
+                        title = "Unlock wallet",
+                        subtitle = "Authenticate to open the stored Monero wallet"
+                    )
+                }
+
+                val loaded = walletManager.loadStoredWalletOnLaunch()
+                if (!loaded) {
+                    errorText.value = "No stored wallet was found"
+                }
+            } catch (t: Throwable) {
+                errorText.value = t.message ?: t.javaClass.simpleName
+            } finally {
+                isLoading.value = false
+            }
+        }
+    }
+
     Scaffold(
         modifier = modifier,
         topBar = {
@@ -186,6 +218,19 @@ fun WalletCreationScreen(
                 "Choose whether you’re creating a brand new wallet (fast sync) or importing an existing wallet " +
                     "(full scan unless you set a restore height)."
             )
+
+            if (hasStoredWallet.value == true) {
+                Spacer(Modifier.height(12.dp))
+                Text("A wallet is already stored on this device.")
+                Spacer(Modifier.height(8.dp))
+                Button(
+                    onClick = { unlockStoredWallet() },
+                    modifier = Modifier.fillMaxWidth(),
+                    enabled = !isLoading.value
+                ) {
+                    Text(if (isLoading.value) "Unlocking..." else "Unlock existing wallet")
+                }
+            }
 
             Spacer(Modifier.height(12.dp))
 

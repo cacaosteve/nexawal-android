@@ -1,0 +1,8 @@
+com.nexatrode.nexawal.walletcore-pngs-0 /Users/steve/supermegamartandwalletcore/nexawal-android/walletcore/build/generated/res/pngs/debug
+com.nexatrode.nexawal.walletcore-updated_navigation_xml-1 /Users/steve/supermegamartandwalletcore/nexawal-android/walletcore/build/generated/updated_navigation_xml/debug
+com.nexatrode.nexawal.walletcore-mergeDebugResources-2 /Users/steve/supermegamartandwalletcore/nexawal-android/walletcore/build/intermediates/incremental/debug/mergeDebugResources/merged.dir
+com.nexatrode.nexawal.walletcore-mergeDebugResources-3 /Users/steve/supermegamartandwalletcore/nexawal-android/walletcore/build/intermediates/incremental/debug/mergeDebugResources/stripped.dir
+com.nexatrode.nexawal.walletcore-debug-4 /Users/steve/supermegamartandwalletcore/nexawal-android/walletcore/build/intermediates/merged_res/debug/mergeDebugResources
+com.nexatrode.nexawal.walletcore-debug-5 /Users/steve/supermegamartandwalletcore/nexawal-android/walletcore/build/intermediates/packaged_res/debug/packageDebugResources
+com.nexatrode.nexawal.walletcore-debug-6 /Users/steve/supermegamartandwalletcore/nexawal-android/walletcore/src/debug/res
+com.nexatrode.nexawal.walletcore-main-7 /Users/steve/supermegamartandwalletcore/nexawal-android/walletcore/src/main/res

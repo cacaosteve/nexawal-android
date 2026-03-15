@@ -31,10 +31,12 @@ object MoneroConfig {
     // Keys (match iOS naming semantics where possible).
     private const val KEY_GAP_LIMIT: String = "monero_gap_limit"
     private const val KEY_ACCOUNT_GAP: String = "walletcore_account_gap"
+    private const val KEY_REQUIRE_DEVICE_AUTH: String = "wallet_require_device_auth"
 
     // Defaults (match iOS MoneroConfig.swift).
     const val DEFAULT_GAP_LIMIT: Int = 50
     const val DEFAULT_ACCOUNT_GAP: Int = 1
+    const val DEFAULT_REQUIRE_DEVICE_AUTH: Boolean = false
 
     // Safety clamps.
     private const val GAP_LIMIT_MIN: Int = 1
@@ -97,6 +99,16 @@ object MoneroConfig {
         prefs(context).edit().putInt(KEY_ACCOUNT_GAP, clamped).apply()
     }
 
+    @JvmStatic
+    fun requireDeviceAuth(context: Context): Boolean {
+        return prefs(context).getBoolean(KEY_REQUIRE_DEVICE_AUTH, DEFAULT_REQUIRE_DEVICE_AUTH)
+    }
+
+    @JvmStatic
+    fun setRequireDeviceAuth(context: Context, enabled: Boolean) {
+        prefs(context).edit().putBoolean(KEY_REQUIRE_DEVICE_AUTH, enabled).apply()
+    }
+
     /**
      * Reset both values back to defaults (useful for debugging).
      */
@@ -105,6 +117,7 @@ object MoneroConfig {
         prefs(context).edit()
             .putInt(KEY_GAP_LIMIT, DEFAULT_GAP_LIMIT)
             .putInt(KEY_ACCOUNT_GAP, DEFAULT_ACCOUNT_GAP)
+            .putBoolean(KEY_REQUIRE_DEVICE_AUTH, DEFAULT_REQUIRE_DEVICE_AUTH)
             .apply()
     }
 
@@ -116,12 +129,14 @@ object MoneroConfig {
         return Snapshot(
             gapLimit = gapLimit(context),
             accountGap = accountGap(context),
+            requireDeviceAuth = requireDeviceAuth(context),
         )
     }
 
     data class Snapshot(
         val gapLimit: Int,
         val accountGap: Int,
+        val requireDeviceAuth: Boolean,
     )
 
     private fun clamp(v: Int, lo: Int, hi: Int): Int = max(lo, min(v, hi))
