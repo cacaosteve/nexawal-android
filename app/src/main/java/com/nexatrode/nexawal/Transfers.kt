@@ -71,8 +71,8 @@ data class Transfer(
      * Direction label normalization helper.
      */
     fun directionLabel(): String = when (direction.lowercase()) {
-        "in" -> "In"
-        "out" -> "Out"
+        "in" -> "Received"
+        "out" -> "Sent"
         "self" -> "Self"
         else -> direction
     }
@@ -99,6 +99,20 @@ object XmrFormat {
         // Use BigDecimal to avoid floating point precision issues.
         return BigDecimal(piconero)
             .divide(BigDecimal(PICONERO_PER_XMR), 12, RoundingMode.DOWN)
+            .toPlainString()
+    }
+
+    /**
+     * Format a piconero amount for primary UI surfaces.
+     *
+     * Wallet home should not show full atomic precision by default. Use a
+     * shorter fixed scale for the main balance while preserving exact values in
+     * detail views.
+     */
+    @JvmStatic
+    fun formatPiconeroAsDisplayXmr(piconero: Long, decimals: Int = 6): String {
+        return BigDecimal(piconero)
+            .divide(BigDecimal(PICONERO_PER_XMR), decimals, RoundingMode.DOWN)
             .toPlainString()
     }
 }
