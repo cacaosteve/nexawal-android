@@ -1122,6 +1122,8 @@ private fun SendScreen(walletManager: WalletManager) {
     var sweepResult by remember { mutableStateOf<SendJson.SweepSendResult?>(null) }
     var errorText by remember { mutableStateOf<String?>(null) }
     var infoText by remember { mutableStateOf<String?>(null) }
+    var showExactConfirmation by remember { mutableStateOf(false) }
+    var showMaxConfirmation by remember { mutableStateOf(false) }
 
     val unlockedPiconero = state.balance?.unlockedPiconero ?: 0L
     val unlockedXmr = XmrFormat.formatPiconeroAsDisplayXmr(unlockedPiconero)
@@ -1130,9 +1132,10 @@ private fun SendScreen(walletManager: WalletManager) {
     fun canPreviewFee(): Boolean = hasWallet && toAddress.trim().isNotEmpty() && amountXmrText.trim().isNotEmpty() && !isEstimating && !isSending
     fun canSendExact(): Boolean = canPreviewFee() && estimatedFee != null
     fun canSendMax(): Boolean = hasWallet && toAddress.trim().isNotEmpty() && !isEstimating && !isSending
+    fun amountPiconeroOrNull(): Long? = runCatching { parseXmrToPiconero(amountXmrText) }.getOrNull()
     fun totalWithFeeText(): String? {
         val fee = estimatedFee ?: return null
-        val amount = runCatching { parseXmrToPiconero(amountXmrText) }.getOrNull() ?: return null
+        val amount = amountPiconeroOrNull() ?: return null
         return XmrFormat.formatPiconeroAsXmr(amount + fee.fee)
     }
 
@@ -1276,37 +1279,7 @@ private fun SendScreen(walletManager: WalletManager) {
         PrimaryActionButton(
             text = if (isSending) "Sending..." else "Send",
             onClick = {
-                errorText = null
-                infoText = null
-                sendResult = null
-                sweepResult = null
-                scope.launch {
-                    isSending = true
-                    try {
-                        val amountPiconero = parseXmrToPiconero(amountXmrText)
-
-                        if (MoneroConfig.requireDeviceAuth(context)) {
-                            val activity = context as? ComponentActivity
-                                ?: throw IllegalStateException("Device authentication requires an activity context")
-                            DeviceAuthGate.authenticate(
-                                activity = activity,
-                                title = "Confirm send",
-                                subtitle = "Authenticate to send Monero"
-                            )
-                        }
-
-                        sendResult = walletManager.send(
-                            toAddress = toAddress.trim(),
-                            amountPiconero = amountPiconero
-                        )
-                        infoText = "Transaction broadcast."
-                        walletManager.refreshWalletDataSnapshots()
-                    } catch (t: Throwable) {
-                        errorText = t.message ?: t.javaClass.simpleName
-                    } finally {
-                        isSending = false
-                    }
-                }
+                showExactConfirmation = true
             },
             enabled = canSendExact(),
             modifier = Modifier.fillMaxWidth()
@@ -1344,31 +1317,7 @@ private fun SendScreen(walletManager: WalletManager) {
         PrimaryActionButton(
             text = if (isSending) "Sending..." else "Send max",
             onClick = {
-                errorText = null
-                infoText = null
-                sendResult = null
-                scope.launch {
-                    isSending = true
-                    try {
-                        if (MoneroConfig.requireDeviceAuth(context)) {
-                            val activity = context as? ComponentActivity
-                                ?: throw IllegalStateException("Device authentication requires an activity context")
-                            DeviceAuthGate.authenticate(
-                                activity = activity,
-                                title = "Confirm send max",
-                                subtitle = "Authenticate to sweep the wallet balance"
-                            )
-                        }
-
-                        sweepResult = walletManager.sweep(toAddress = toAddress.trim())
-                        infoText = "Maximum spendable balance broadcast."
-                        walletManager.refreshWalletDataSnapshots()
-                    } catch (t: Throwable) {
-                        errorText = t.message ?: t.javaClass.simpleName
-                    } finally {
-                        isSending = false
-                    }
-                }
+                showMaxConfirmation = true
             },
             enabled = canSendMax(),
             modifier = Modifier.fillMaxWidth()
@@ -1379,6 +1328,150 @@ private fun SendScreen(walletManager: WalletManager) {
         SectionLabel("Advanced", palette)
         Spacer(Modifier.height(8.dp))
         Text("Node policy: ${walletManager.currentNodeUrl()}", color = palette.secondaryText)
+    }
+
+    if (showExactConfirmation) {
+        val amountPiconero = amountPiconeroOrNull()
+        AlertDialog(
+            onDismissRequest = { showExactConfirmation = false },
+            title = { Text("Confirm Send") },
+            text = {
+                Column {
+                    Text("To", color = palette.secondaryText)
+                    Text(toAddress.trim(), fontFamily = FontFamily.Monospace, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    Spacer(Modifier.height(8.dp))
+                    amountPiconero?.let {
+                        Text("Amount", color = palette.secondaryText)
+                        Text("${XmrFormat.formatPiconeroAsDisplayXmr(it)} XMR", fontFamily = FontFamily.Monospace)
+                    }
+                    estimatedFee?.let {
+                        Spacer(Modifier.height(8.dp))
+                        Text("Fee", color = palette.secondaryText)
+                        Text("${it.feeXmr} XMR", fontFamily = FontFamily.Monospace)
+                    }
+                    totalWithFeeText()?.let {
+                        Spacer(Modifier.height(8.dp))
+                        Text("Total", color = palette.secondaryText)
+                        Text("$it XMR", fontFamily = FontFamily.Monospace)
+                    }
+                }
+            },
+            confirmButton = {
+                PrimaryActionButton(
+                    text = "Confirm Send",
+                    onClick = {
+                        showExactConfirmation = false
+                        errorText = null
+                        infoText = null
+                        sendResult = null
+                        sweepResult = null
+                        scope.launch {
+                            isSending = true
+                            try {
+                                val amountPiconeroNow = parseXmrToPiconero(amountXmrText)
+
+                                if (MoneroConfig.requireDeviceAuth(context)) {
+                                    val activity = context as? ComponentActivity
+                                        ?: throw IllegalStateException("Device authentication requires an activity context")
+                                    DeviceAuthGate.authenticate(
+                                        activity = activity,
+                                        title = "Confirm send",
+                                        subtitle = "Authenticate to send Monero"
+                                    )
+                                }
+
+                                sendResult = walletManager.send(
+                                    toAddress = toAddress.trim(),
+                                    amountPiconero = amountPiconeroNow
+                                )
+                                infoText = "Transaction broadcast."
+                                walletManager.refreshWalletDataSnapshots()
+                            } catch (t: Throwable) {
+                                errorText = t.message ?: t.javaClass.simpleName
+                            } finally {
+                                isSending = false
+                            }
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                )
+            },
+            dismissButton = {
+                SecondaryActionButton(
+                    text = "Cancel",
+                    onClick = { showExactConfirmation = false },
+                    palette = palette,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+        )
+    }
+
+    if (showMaxConfirmation) {
+        AlertDialog(
+            onDismissRequest = { showMaxConfirmation = false },
+            title = { Text("Confirm Send Max") },
+            text = {
+                Column {
+                    Text("To", color = palette.secondaryText)
+                    Text(toAddress.trim(), fontFamily = FontFamily.Monospace, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    sweepPreview?.let {
+                        Spacer(Modifier.height(8.dp))
+                        Text("Amount", color = palette.secondaryText)
+                        Text("${it.amountXmr} XMR", fontFamily = FontFamily.Monospace)
+                        Spacer(Modifier.height(8.dp))
+                        Text("Fee", color = palette.secondaryText)
+                        Text("${it.feeXmr} XMR", fontFamily = FontFamily.Monospace)
+                    } ?: run {
+                        Spacer(Modifier.height(8.dp))
+                        Text("Preview the max amount before sending.", color = palette.secondaryText)
+                    }
+                }
+            },
+            confirmButton = {
+                PrimaryActionButton(
+                    text = "Confirm Send Max",
+                    onClick = {
+                        showMaxConfirmation = false
+                        errorText = null
+                        infoText = null
+                        sendResult = null
+                        scope.launch {
+                            isSending = true
+                            try {
+                                if (MoneroConfig.requireDeviceAuth(context)) {
+                                    val activity = context as? ComponentActivity
+                                        ?: throw IllegalStateException("Device authentication requires an activity context")
+                                    DeviceAuthGate.authenticate(
+                                        activity = activity,
+                                        title = "Confirm send max",
+                                        subtitle = "Authenticate to sweep the wallet balance"
+                                    )
+                                }
+
+                                sweepResult = walletManager.sweep(toAddress = toAddress.trim())
+                                infoText = "Maximum spendable balance broadcast."
+                                walletManager.refreshWalletDataSnapshots()
+                            } catch (t: Throwable) {
+                                errorText = t.message ?: t.javaClass.simpleName
+                            } finally {
+                                isSending = false
+                            }
+                        }
+                    },
+                    enabled = sweepPreview != null,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            },
+            dismissButton = {
+                SecondaryActionButton(
+                    text = "Cancel",
+                    onClick = { showMaxConfirmation = false },
+                    palette = palette,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+        )
     }
 }
 
