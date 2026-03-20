@@ -64,6 +64,15 @@ dependencies {
     // QR code generation (Receive flow)
     implementation("com.google.zxing:core:3.5.3")
 
+    // QR code scanning (Send flow)
+    implementation("com.google.mlkit:barcode-scanning:17.3.0")
+    implementation("androidx.camera:camera-camera2:1.4.1")
+    implementation("androidx.camera:camera-lifecycle:1.4.1")
+    implementation("androidx.camera:camera-view:1.4.1")
+
+    // Permissions
+    implementation("com.google.accompanist:accompanist-permissions:0.36.0")
+
     // HTTP client (dev probe: daemon /get_height from emulator network stack)
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
 

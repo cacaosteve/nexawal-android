@@ -23,6 +23,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.QrCode
+import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -939,6 +940,19 @@ private fun ReceiveScreen(walletManager: WalletManager) {
             Text(receiveAddress.ifBlank { "(unavailable)" }, fontFamily = FontFamily.Monospace)
         }
 
+        if (paymentUri.isNotBlank() && paymentUri.startsWith("monero:")) {
+            Spacer(Modifier.height(12.dp))
+            SectionLabel("Payment URI", palette)
+            Spacer(Modifier.height(6.dp))
+            SelectionContainer {
+                Text(
+                    paymentUri, 
+                    fontFamily = FontFamily.Monospace, 
+                    style = androidx.compose.material3.MaterialTheme.typography.bodySmall
+                )
+            }
+        }
+
         Spacer(Modifier.height(12.dp))
 
         PrimaryActionButton(
@@ -1124,6 +1138,7 @@ private fun SendScreen(walletManager: WalletManager) {
     var infoText by remember { mutableStateOf<String?>(null) }
     var showExactConfirmation by remember { mutableStateOf(false) }
     var showMaxConfirmation by remember { mutableStateOf(false) }
+    var showScanner by remember { mutableStateOf(false) }
 
     val unlockedPiconero = state.balance?.unlockedPiconero ?: 0L
     val unlockedXmr = XmrFormat.formatPiconeroAsDisplayXmr(unlockedPiconero)
@@ -1167,7 +1182,15 @@ private fun SendScreen(walletManager: WalletManager) {
             singleLine = true,
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(bottom = 8.dp)
+                .padding(bottom = 8.dp),
+            trailingIcon = {
+                androidx.compose.material3.IconButton(onClick = { showScanner = true }) {
+                    Icon(
+                        imageVector = Icons.Default.QrCodeScanner,
+                        contentDescription = "Scan QR code"
+                    )
+                }
+            }
         )
 
         Text("Amount (XMR)")
@@ -1471,6 +1494,94 @@ private fun SendScreen(walletManager: WalletManager) {
                     modifier = Modifier.fillMaxWidth()
                 )
             }
+        )
+    }
+
+    fun looksLikeAddress(addr: String): Boolean {
+        val s = addr.trim()
+        if (s.isEmpty()) return false
+        val first = s.first()
+        return first == '4' || first == '8' || first == '5'
+    }
+
+    fun parseMoneroUri(uri: String) {
+        try {
+            val uriLower = uri.lowercase()
+            if (!uriLower.startsWith("monero:")) {
+                errorText = "Invalid payment URI format."
+                return
+            }
+
+            val addressPart = uriLower.removePrefix("monero:")
+            val address = if (addressPart.contains("?")) {
+                addressPart.substringBefore("?")
+            } else {
+                addressPart
+            }
+
+            if (!looksLikeAddress(address)) {
+                errorText = "No valid address in payment URI."
+                return
+            }
+
+            toAddress = address
+
+            if (uri.contains("?")) {
+                val queryString = uri.substringAfter("?")
+                val params = queryString.split("&").associate { param ->
+                    val keyValue = param.split("=", limit = 2)
+                    keyValue[0] to (keyValue.getOrNull(1) ?: "")
+                }
+
+                val amountParam = params["amount"] ?: params["tx_amount"]
+                amountParam?.let { amountStr ->
+                    try {
+                        val amount = amountStr.toDoubleOrNull()
+                        if (amount != null) {
+                            if (amount >= 1.0) {
+                                amountXmrText = String.format("%.12f", amount)
+                            } else {
+                                val pico = (amount * 1e12).toLong()
+                                amountXmrText = String.format("%.12f", pico / 1e12)
+                            }
+                        }
+                    } catch (e: Exception) {
+                        // Ignore parsing errors
+                    }
+                }
+            }
+
+            infoText = "Payment details loaded from QR code."
+        } catch (e: Exception) {
+            errorText = "Failed to parse payment URI: ${e.message}"
+        }
+    }
+
+    fun handleScannedCode(code: String) {
+        val trimmed = code.trim()
+
+        if (trimmed.lowercase().startsWith("monero:")) {
+            parseMoneroUri(trimmed)
+        } else if (looksLikeAddress(trimmed)) {
+            toAddress = trimmed
+            infoText = "Address loaded from QR code."
+        } else {
+            errorText = "Invalid QR code. Expected Monero address or payment URI."
+        }
+
+        estimatedFee = null
+        sweepPreview = null
+        sendResult = null
+        sweepResult = null
+    }
+
+    if (showScanner) {
+        QRScannerScreen(
+            onScan = { code ->
+                showScanner = false
+                handleScannedCode(code)
+            },
+            onDismiss = { showScanner = false }
         )
     }
 }
