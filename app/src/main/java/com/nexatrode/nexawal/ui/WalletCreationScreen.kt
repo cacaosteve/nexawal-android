@@ -31,6 +31,7 @@ import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -43,6 +44,7 @@ import androidx.compose.ui.unit.dp
 import com.nexatrode.nexawal.DeviceAuthGate
 import com.nexatrode.nexawal.MoneroConfig
 import com.nexatrode.nexawal.WalletManager
+import com.nexatrode.nexawal.walletcore.WalletCore
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -101,6 +103,27 @@ fun WalletCreationScreen(
     val isFetchingSuggestedHeight = remember { mutableStateOf(false) }
     val suggestedHeightError = remember { mutableStateOf<String?>(null) }
 
+    // CREATE mode: freshly generated mnemonic + "wrote it down" backup gate.
+    val generatedMnemonic = remember { mutableStateOf("") }
+    val wroteSeedDown = remember { mutableStateOf(false) }
+    val challengePositions = remember { mutableStateOf(listOf<Int>()) }
+    val challengeAnswers = remember { mutableStateListOf("", "", "") }
+
+    suspend fun regenerateCreateSeed() {
+        try {
+            val mnemonic = withContext(Dispatchers.Default) { WalletCore.generateMnemonicEnglish() }
+            generatedMnemonic.value = mnemonic
+            wroteSeedDown.value = false
+            val words = mnemonic.trim().split(Regex("\\s+")).filter { it.isNotBlank() }
+            val positions = randomChallengePositions(words.size)
+            challengePositions.value = positions
+            challengeAnswers.clear()
+            repeat(positions.size) { challengeAnswers.add("") }
+        } catch (t: Throwable) {
+            errorText.value = t.message ?: t.javaClass.simpleName
+        }
+    }
+
     LaunchedEffect(Unit) {
         // Authoritative: check persisted wallet presence (metadata exists)
         hasStoredWallet.value = runCatching { walletManager.hasStoredWallet() }.getOrNull()
@@ -126,6 +149,13 @@ fun WalletCreationScreen(
         )
     }
 
+    // Generate a fresh seed (and its backup-confirmation challenges) whenever CREATE mode is entered.
+    LaunchedEffect(setupMode) {
+        if (setupMode == WalletSetupMode.CREATE) {
+            regenerateCreateSeed()
+        }
+    }
+
     fun effectiveRestoreHeight(): Long {
         val raw = restoreHeightInput.value.trim().toLongOrNull() ?: 0L
         return if (setupMode == WalletSetupMode.CREATE && raw == 0L) {
@@ -136,7 +166,28 @@ fun WalletCreationScreen(
         }
     }
 
-    fun canSubmit(): Boolean = mnemonicInput.value.trim().isNotEmpty() && !isLoading.value
+    fun challengesAllCorrect(): Boolean {
+        val positions = challengePositions.value
+        if (positions.isEmpty() || positions.size < 3 || challengeAnswers.size < 3) return false
+        val words = generatedMnemonic.value.trim().split(Regex("\\s+")).filter { it.isNotBlank() }
+        return positions.indices.all { i ->
+            val expected = words.getOrNull(positions[i] - 1) ?: return@all false
+            val answer = challengeAnswers.getOrElse(i) { "" }
+            expected.trim().equals(answer.trim(), ignoreCase = true)
+        }
+    }
+
+    fun effectiveMnemonic(): String =
+        if (setupMode == WalletSetupMode.CREATE) generatedMnemonic.value else mnemonicInput.value
+
+    fun canSubmit(): Boolean = when (setupMode) {
+        WalletSetupMode.IMPORT -> mnemonicInput.value.trim().isNotEmpty() && !isLoading.value
+        WalletSetupMode.CREATE ->
+            generatedMnemonic.value.trim().isNotEmpty() &&
+                wroteSeedDown.value &&
+                challengesAllCorrect() &&
+                !isLoading.value
+    }
 
     fun submit(replaceExisting: Boolean) {
         errorText.value = null
@@ -154,7 +205,7 @@ fun WalletCreationScreen(
 
                 walletManager.openWalletFromMnemonic(
                     walletId = walletId,
-                    mnemonic = mnemonicInput.value,
+                    mnemonic = effectiveMnemonic(),
                     restoreHeight = effectiveRestoreHeight(),
                     nodeUrl = nodeUrl,
                     mainnet = isMainnet.value,
@@ -182,7 +233,12 @@ fun WalletCreationScreen(
 
         scope.launch {
             try {
-                if (MoneroConfig.requireDeviceAuth(context) && DeviceAuthGate.isAvailable(context)) {
+                if (MoneroConfig.requireDeviceAuth(context)) {
+                    if (!DeviceAuthGate.isAvailable(context)) {
+                        throw IllegalStateException(
+                            "Device authentication is required but unavailable. Enable biometrics or a screen lock, then retry."
+                        )
+                    }
                     val activity = context as? ComponentActivity
                         ?: throw IllegalStateException("Device authentication requires an activity context")
                     DeviceAuthGate.authenticate(
@@ -280,21 +336,91 @@ fun WalletCreationScreen(
 
             Spacer(Modifier.height(12.dp))
 
-            Text("Mnemonic (paste):", color = palette.primaryText)
-            OutlinedTextField(
-                value = mnemonicInput.value,
-                onValueChange = { mnemonicInput.value = it },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(160.dp),
-                placeholder = { Text("Paste 25-word mnemonic…", color = palette.secondaryText) },
-                textStyle = androidx.compose.ui.text.TextStyle(
-                    fontFamily = FontFamily.Monospace,
-                    color = palette.primaryText,
-                ),
-                singleLine = false,
-                colors = nexaFieldColors(palette),
-            )
+            when (setupMode) {
+                WalletSetupMode.CREATE -> {
+                    Text("Your recovery seed:", color = palette.primaryText)
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        "Write these words down in order and store them somewhere safe. " +
+                            "You’ll need them to restore your wallet — they are never stored on this device.",
+                        color = palette.secondaryText,
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = generatedMnemonic.value,
+                        onValueChange = {},
+                        readOnly = true,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(160.dp),
+                        textStyle = androidx.compose.ui.text.TextStyle(
+                            fontFamily = FontFamily.Monospace,
+                            color = palette.primaryText,
+                        ),
+                        singleLine = false,
+                        colors = nexaFieldColors(palette),
+                    )
+
+                    Spacer(Modifier.height(8.dp))
+
+                    SecondaryActionButton(
+                        text = "Generate new seed",
+                        onClick = { scope.launch { regenerateCreateSeed() } },
+                        palette = palette,
+                        modifier = Modifier.fillMaxWidth(),
+                        enabled = !isLoading.value,
+                    )
+
+                    Spacer(Modifier.height(12.dp))
+
+                    RowSwitch(
+                        label = "I wrote down my recovery seed",
+                        state = wroteSeedDown,
+                        enabled = generatedMnemonic.value.isNotEmpty(),
+                        palette = palette,
+                    )
+
+                    if (wroteSeedDown.value) {
+                        Spacer(Modifier.height(12.dp))
+                        Text("Confirm your backup — enter the requested words:", color = palette.primaryText)
+                        Spacer(Modifier.height(6.dp))
+
+                        challengePositions.value.forEachIndexed { index, position ->
+                            OutlinedTextField(
+                                value = challengeAnswers.getOrElse(index) { "" },
+                                onValueChange = { value ->
+                                    if (index < challengeAnswers.size) {
+                                        challengeAnswers[index] = value
+                                    }
+                                },
+                                modifier = Modifier.fillMaxWidth(),
+                                label = { Text("Word #$position", color = palette.secondaryText) },
+                                singleLine = true,
+                                colors = nexaFieldColors(palette),
+                            )
+                            Spacer(Modifier.height(8.dp))
+                        }
+                    }
+                }
+
+                WalletSetupMode.IMPORT -> {
+                    Text("Mnemonic (paste):", color = palette.primaryText)
+                    OutlinedTextField(
+                        value = mnemonicInput.value,
+                        onValueChange = { mnemonicInput.value = it },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(160.dp),
+                        placeholder = { Text("Paste 25-word mnemonic…", color = palette.secondaryText) },
+                        textStyle = androidx.compose.ui.text.TextStyle(
+                            fontFamily = FontFamily.Monospace,
+                            color = palette.primaryText,
+                        ),
+                        singleLine = false,
+                        colors = nexaFieldColors(palette),
+                    )
+                }
+            }
 
             Spacer(Modifier.height(12.dp))
 
@@ -467,6 +593,15 @@ private fun RowSwitch(
             colors = nexaSwitchColors(palette),
         )
     }
+}
+
+/**
+ * Picks up to [count] distinct 1-based word positions (in ascending order) out of [wordCount]
+ * words, used to challenge the user on words from the seed they just generated.
+ */
+private fun randomChallengePositions(wordCount: Int, count: Int = 3): List<Int> {
+    if (wordCount <= 0) return emptyList()
+    return (1..wordCount).shuffled().take(minOf(count, wordCount)).sorted()
 }
 
 private suspend fun refreshSuggestedRestoreHeightIfNeeded(

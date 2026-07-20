@@ -35,10 +35,11 @@ class MainActivity : ComponentActivity() {
                     val hasStoredWallet = runCatching { walletManager.hasStoredWallet() }.getOrDefault(false)
                     if (hasStoredWallet) {
                         val shouldRequireAuth = MoneroConfig.requireDeviceAuth(applicationContext)
-                        val unlocked = if (!shouldRequireAuth || !DeviceAuthGate.isAvailable(applicationContext)) {
-                            true
-                        } else {
-                            runCatching {
+                        val unlocked = when {
+                            !shouldRequireAuth -> true
+                            // Protection enabled but auth unavailable: do not silently open the wallet.
+                            !DeviceAuthGate.isAvailable(applicationContext) -> false
+                            else -> runCatching {
                                 DeviceAuthGate.authenticate(
                                     activity = this@MainActivity,
                                     title = "Unlock wallet",

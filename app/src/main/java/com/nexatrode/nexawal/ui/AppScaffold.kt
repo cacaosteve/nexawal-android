@@ -574,16 +574,18 @@ private fun WalletScreen(
     //
     // Prefer a stable target captured at refresh start; otherwise only treat chainHeight as usable
     // if it is strictly greater than restoreHeight (meaning we have learned a real daemon height).
-    val tipKnown = chainHeight > restoreHeight
+    // Tip must be a real daemon height (not preflight chainHeight ≈ restoreHeight).
+    val tipKnown = chainHeight > restoreHeight || (state.syncStatus?.chainTime ?: 0L) > 0L
     val targetHeight = when {
-        state.refreshTargetHeight != null -> state.refreshTargetHeight!!
+        tipKnown && state.refreshTargetHeight != null -> state.refreshTargetHeight!!
         tipKnown -> chainHeight
         else -> 0L
     }
 
     val remainingBlocks = if (targetHeight > 0L) (targetHeight - lastScanned).coerceAtLeast(0L) else 0L
     val syncTolerance = 3L
-    val isSynced = targetHeight > 0L && lastScanned + syncTolerance >= targetHeight
+    val isSynced =
+        !state.refreshInProgress && targetHeight > 0L && lastScanned + syncTolerance >= targetHeight
 
     // iOS-like blocks/sec:
     // - compute instantaneous rate from lastScanned deltas
@@ -791,8 +793,13 @@ private fun WalletScreen(
 
         SectionCard(palette = palette) {
             Column {
+                val hasNodeError = mergedError != null && !state.refreshInProgress && !isSynced
+                // Treat sync as effectively not-complete for display when a refresh error exists,
+                // so we never imply "synced" alongside an unreachable/failed node.
+                val isSyncedEffective = isSynced && mergedError == null
                 val syncHeadlineRaw = when {
-                    isSynced -> "Wallet synced"
+                    hasNodeError -> "Node unreachable"
+                    isSyncedEffective -> "Wallet synced"
                     targetHeight == 0L -> "Connecting to node"
                     state.refreshInProgress && lastScanned == restoreHeight -> "Scanning blockchain"
                     state.refreshInProgress && blocksPerSecSmoothed <= 0.0 -> "Syncing wallet"
@@ -800,7 +807,8 @@ private fun WalletScreen(
                 }
                 val syncHeadline = if (palette.classic) syncHeadlineRaw.uppercase() else syncHeadlineRaw
                 val syncDetail = when {
-                    isSynced -> "Scanned to block ${formatGrouped(lastScanned)}"
+                    hasNodeError -> mergedError!!.let { if (it.length > 120) it.take(120) + "…" else it }
+                    isSyncedEffective -> "Scanned to block ${formatGrouped(lastScanned)}"
                     targetHeight == 0L -> "Waiting for network height"
                     state.refreshInProgress && lastScanned == restoreHeight -> "Fetching initial blocks from ${formatGrouped(restoreHeight)}"
                     else -> "${formatGrouped(remainingBlocks)} blocks remaining"
@@ -808,9 +816,9 @@ private fun WalletScreen(
 
                 Row {
                     Icon(
-                        imageVector = if (isSynced) Icons.Filled.CheckCircle else Icons.Filled.Sync,
+                        imageVector = if (isSyncedEffective) Icons.Filled.CheckCircle else Icons.Filled.Sync,
                         contentDescription = syncHeadline,
-                        tint = if (isSynced) palette.success else palette.accent
+                        tint = if (isSyncedEffective) palette.success else palette.accent
                     )
                     Spacer(Modifier.width(8.dp))
                     Text(
@@ -831,7 +839,7 @@ private fun WalletScreen(
                     KeyValueRow(if (palette.classic) "NETWORK HEIGHT" else "Network Height", formatGrouped(targetHeight), labelColor = iosSecondary, valueColor = iosPrimaryText)
                     KeyValueRow(if (palette.classic) "PROGRESS" else "Progress", progressPercentText, labelColor = iosSecondary, valueColor = iosPrimaryText)
                 }
-                if (!isSynced) {
+                if (!isSyncedEffective) {
                     KeyValueRow(if (palette.classic) "REMAINING" else "Remaining", "${formatGrouped(remainingBlocks)} blocks", labelColor = iosSecondary, valueColor = iosPrimaryText)
                 }
                 if (state.refreshInProgress && blocksPerSecSmoothed > 0.0) {
@@ -1088,6 +1096,7 @@ private fun TransferDetailsDialog(
     val absTime = TimeFormat.absolute(t.timestamp)
     val clipboard = ClipboardCompat.current()
     val scope = rememberCoroutineScope()
+    val context = LocalContext.current
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -1120,6 +1129,21 @@ private fun TransferDetailsDialog(
                     )
                 ) {
                     Text("Copy TXID")
+                }
+                Spacer(Modifier.height(8.dp))
+                Button(
+                    onClick = {
+                        val uri = android.net.Uri.parse("https://xmrchain.net/tx/${t.txid}")
+                        runCatching {
+                            context.startActivity(Intent(Intent.ACTION_VIEW, uri))
+                        }
+                    },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = Color(0xFF121612),
+                        contentColor = Color(0xFF39FF14),
+                    )
+                ) {
+                    Text("Open in Explorer")
                 }
             }
         },
@@ -1265,18 +1289,36 @@ private fun ReceiveScreen(walletManager: WalletManager, palette: NexaPalette) {
 
         Spacer(Modifier.height(12.dp))
 
+        val hasPaymentAmount = amountXmr.trim().isNotEmpty()
+
         PrimaryActionButton(
-            text = "Copy",
+            text = "Copy Address",
             palette = palette,
             onClick = {
                 scope.launch {
-                    ClipboardCompat.setText(clipboard, if (paymentUri.isNotBlank()) paymentUri else receiveAddress)
-                    statusText = "Copied"
+                    ClipboardCompat.setText(clipboard, receiveAddress)
+                    statusText = "Address copied"
                 }
             },
             enabled = receiveAddress.isNotBlank(),
             modifier = Modifier.fillMaxWidth()
         )
+
+        if (hasPaymentAmount && paymentUri.isNotBlank()) {
+            Spacer(Modifier.height(8.dp))
+            SecondaryActionButton(
+                text = "Copy Payment URI",
+                onClick = {
+                    scope.launch {
+                        ClipboardCompat.setText(clipboard, paymentUri)
+                        statusText = "Payment URI copied"
+                    }
+                },
+                enabled = paymentUri.isNotBlank(),
+                palette = palette,
+                modifier = Modifier.fillMaxWidth()
+            )
+        }
 
         Spacer(Modifier.height(8.dp))
 
@@ -1893,6 +1935,11 @@ private fun SendScreen(walletManager: WalletManager, palette: NexaPalette) {
                                 }
 
                                 if (MoneroConfig.requireDeviceAuth(context)) {
+                                    if (!DeviceAuthGate.isAvailable(context)) {
+                                        throw IllegalStateException(
+                                            "Device authentication is required but unavailable. Enable biometrics or a screen lock, then retry."
+                                        )
+                                    }
                                     val activity = context as? ComponentActivity
                                         ?: throw IllegalStateException("Device authentication requires an activity context")
                                     DeviceAuthGate.authenticate(
@@ -1977,6 +2024,11 @@ private fun SendScreen(walletManager: WalletManager, palette: NexaPalette) {
                         scope.launch {
                             try {
                                 if (MoneroConfig.requireDeviceAuth(context)) {
+                                    if (!DeviceAuthGate.isAvailable(context)) {
+                                        throw IllegalStateException(
+                                            "Device authentication is required but unavailable. Enable biometrics or a screen lock, then retry."
+                                        )
+                                    }
                                     val activity = context as? ComponentActivity
                                         ?: throw IllegalStateException("Device authentication requires an activity context")
                                     DeviceAuthGate.authenticate(
