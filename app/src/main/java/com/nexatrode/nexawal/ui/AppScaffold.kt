@@ -2003,18 +2003,22 @@ private fun SendScreen(walletManager: WalletManager, palette: NexaPalette) {
 
     fun parseMoneroUri(uri: String) {
         try {
-            val uriLower = uri.lowercase()
-            if (!uriLower.startsWith("monero:")) {
+            val trimmed = uri.trim()
+            if (!trimmed.lowercase().startsWith("monero:")) {
                 errorText = "Invalid payment URI format."
                 return
             }
 
-            val addressPart = uriLower.removePrefix("monero:")
-            val address = if (addressPart.contains("?")) {
-                addressPart.substringBefore("?")
-            } else {
-                addressPart
+            // Preserve Base58 case: only treat the scheme case-insensitively.
+            var remainder = trimmed.substring(trimmed.indexOf(':') + 1)
+            if (remainder.startsWith("//")) {
+                remainder = remainder.removePrefix("//")
             }
+
+            val address = remainder
+                .substringBefore('?')
+                .trim('/')
+                .trim()
 
             if (!looksLikeAddress(address)) {
                 errorText = "No valid address in payment URI."
@@ -2023,27 +2027,18 @@ private fun SendScreen(walletManager: WalletManager, palette: NexaPalette) {
 
             toAddress = address
 
-            if (uri.contains("?")) {
-                val queryString = uri.substringAfter("?")
+            if (remainder.contains('?')) {
+                val queryString = remainder.substringAfter('?')
                 val params = queryString.split("&").associate { param ->
                     val keyValue = param.split("=", limit = 2)
-                    keyValue[0] to (keyValue.getOrNull(1) ?: "")
+                    keyValue[0].lowercase() to (keyValue.getOrNull(1) ?: "")
                 }
 
                 val amountParam = params["amount"] ?: params["tx_amount"]
                 amountParam?.let { amountStr ->
-                    try {
-                        val amount = amountStr.toDoubleOrNull()
-                        if (amount != null) {
-                            if (amount >= 1.0) {
-                                amountXmrText = String.format("%.12f", amount)
-                            } else {
-                                val pico = (amount * 1e12).toLong()
-                                amountXmrText = String.format("%.12f", pico / 1e12)
-                            }
-                        }
-                    } catch (e: Exception) {
-                        // Ignore parsing errors
+                    val amount = amountStr.toDoubleOrNull()
+                    if (amount != null && amount >= 0.0) {
+                        amountXmrText = String.format("%.12f", amount)
                     }
                 }
             }
