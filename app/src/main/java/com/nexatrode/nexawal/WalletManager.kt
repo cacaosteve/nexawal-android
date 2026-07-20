@@ -289,8 +289,16 @@ class WalletManager(
      * happened before spend/broadcast (mirrors iOS WalletManager).
      */
     private fun <T> withOptionalSiblingFeeRetry(nodeUrl: String, op: (String) -> T): T {
+        return withOptionalSiblingFeeRetryReturningEndpoint(nodeUrl, op).first
+    }
+
+    /** Same as [withOptionalSiblingFeeRetry], but also returns the endpoint that succeeded. */
+    private fun <T> withOptionalSiblingFeeRetryReturningEndpoint(
+        nodeUrl: String,
+        op: (String) -> T,
+    ): Pair<T, String> {
         return try {
-            op(nodeUrl)
+            Pair(op(nodeUrl), nodeUrl)
         } catch (t: Throwable) {
             val coreMsg = runCatching { WalletCore.lastErrorMessage() }.getOrNull().orEmpty()
             val fallback = SendSafety.shouldRetryViaSiblingMonerod(
@@ -302,7 +310,7 @@ class WalletManager(
                 "WalletManager",
                 "Cuprate fee RPC unavailable at $nodeUrl; retrying via sibling Monero RPC $fallback",
             )
-            op(fallback)
+            Pair(op(fallback), fallback)
         }
     }
 
@@ -597,6 +605,7 @@ class WalletManager(
         // Best-effort: import cache from disk if present.
         withContext(ioDispatcher) {
             importCacheIfPresent(walletId)
+            recoverPendingPreparedSendBestEffort(walletId)
         }
         // Refresh status snapshot after open/import.
         updateStatusSnapshot(walletId)
@@ -1226,8 +1235,9 @@ class WalletManager(
     /**
      * Send a transaction (single destination).
      *
-     * Important: mirrors iOS behavior by persisting cache immediately after send so the pending
-     * outgoing survives process death / restart.
+     * Exact (unfiltered) sends use prepare → durable persist → relay so a crash between
+     * signing and broadcast can be retried idempotently. Filtered / sweep paths still use
+     * fire-and-forget send (no prepare-with-filter / prepare-sweep in the core ABI yet).
      */
     suspend fun send(
         toAddress: String,
@@ -1237,10 +1247,13 @@ class WalletManager(
         val walletId = _state.value.walletId ?: throw IllegalStateException("No wallet open")
         val nodeUrl = resolveBroadcastNodeUrl()
 
-        val raw = withContext(ioDispatcher) {
+        val res = withContext(ioDispatcher) {
             applyProxyEnv(forBroadcast = true)
-            withOptionalSiblingFeeRetry(nodeUrl) { endpoint ->
-                WalletCore.sendJson(
+            // Finish any prior prepared payload before constructing a new one (shared inputs).
+            completePendingPreparedSend(walletId, preferredNodeUrl = nodeUrl)
+
+            val (preparedRaw, usedEndpoint) = withOptionalSiblingFeeRetryReturningEndpoint(nodeUrl) { endpoint ->
+                WalletCore.prepareSendJson(
                     walletId = walletId,
                     toAddress = toAddress,
                     amountPiconero = amountPiconero,
@@ -1248,8 +1261,23 @@ class WalletManager(
                     nodeUrl = endpoint,
                 )
             }
+            val prepared = SendJson.decodePreparedSend(preparedRaw)
+            persistPendingPrepared(walletId, usedEndpoint, prepared)
+
+            val relayRaw = WalletCore.relayPreparedJson(
+                walletId = walletId,
+                preparedJson = SendJson.encodePreparedSend(prepared),
+                nodeUrl = usedEndpoint,
+            )
+            val relay = SendJson.decodeRelayResult(relayRaw)
+            clearPendingPrepared(walletId)
+
+            Log.i(
+                "WalletManager",
+                "prepare→relay ok txid=${relay.txid} status=${relay.status} fee=${prepared.fee} endpoint=$usedEndpoint",
+            )
+            SendJson.SendResult(txid = relay.txid, fee = prepared.fee)
         }
-        val res = SendJson.decodeSendResult(raw)
 
         // Persist immediately so pending outgoing survives restart before next refresh.
         withContext(ioDispatcher) {
@@ -1717,6 +1745,83 @@ class WalletManager(
         return File(dir, "$walletId.cache")
     }
 
+    /** Durable prepared-send payload so relay can resume after a crash mid-broadcast. */
+    private fun preparedFile(walletId: String, mainnet: Boolean = true): File {
+        val netDir = if (mainnet) "mainnet" else "stagenet"
+        val dir = File(appContext.filesDir, "WalletCaches/$netDir")
+        return File(dir, "$walletId.prepared.json")
+    }
+
+    private fun persistPendingPrepared(
+        walletId: String,
+        nodeUrl: String,
+        prepared: SendJson.PreparedSend,
+    ) {
+        val f = preparedFile(walletId, mainnet = true)
+        ensureCacheDirExists(f)
+        val envelope = SendJson.PendingPreparedEnvelope(nodeUrl = nodeUrl, prepared = prepared)
+        f.writeText(SendJson.encodePendingPreparedEnvelope(envelope))
+        Log.i("WalletManager", "Persisted prepared send txid=${prepared.txid} to ${f.name}")
+    }
+
+    private fun clearPendingPrepared(walletId: String) {
+        val f = preparedFile(walletId, mainnet = true)
+        if (f.exists()) {
+            f.delete()
+            Log.i("WalletManager", "Cleared prepared send file ${f.name}")
+        }
+    }
+
+    private fun loadPendingPrepared(walletId: String): SendJson.PendingPreparedEnvelope? {
+        val f = preparedFile(walletId, mainnet = true)
+        if (!f.exists()) return null
+        return runCatching {
+            SendJson.decodePendingPreparedEnvelope(f.readText())
+        }.onFailure { t ->
+            Log.w("WalletManager", "Failed to decode prepared send file: ${t.message}")
+        }.getOrNull()
+    }
+
+    /**
+     * If a prepared payload is on disk, relay it (idempotent) before any new prepare.
+     * Throws on relay failure so we do not construct a conflicting second tx.
+     */
+    private fun completePendingPreparedSend(walletId: String, preferredNodeUrl: String) {
+        val pending = loadPendingPrepared(walletId) ?: return
+        applyProxyEnv(forBroadcast = true)
+        val endpoint = pending.nodeUrl.ifBlank { preferredNodeUrl }
+        Log.i(
+            "WalletManager",
+            "Recovering pending prepared send txid=${pending.prepared.txid} via $endpoint",
+        )
+        val relayRaw = WalletCore.relayPreparedJson(
+            walletId = walletId,
+            preparedJson = SendJson.encodePreparedSend(pending.prepared),
+            nodeUrl = endpoint,
+        )
+        val relay = SendJson.decodeRelayResult(relayRaw)
+        clearPendingPrepared(walletId)
+        exportCacheAndPersist(walletId)
+        Log.i(
+            "WalletManager",
+            "Recovered pending prepared send txid=${relay.txid} status=${relay.status}",
+        )
+    }
+
+    private fun recoverPendingPreparedSendBestEffort(walletId: String) {
+        runCatching {
+            completePendingPreparedSend(
+                walletId = walletId,
+                preferredNodeUrl = resolveBroadcastNodeUrl(),
+            )
+        }.onFailure { t ->
+            Log.w(
+                "WalletManager",
+                "Pending prepared send recovery deferred: ${t.message ?: t.toString()}",
+            )
+        }
+    }
+
     private fun ensureCacheDirExists(file: File) {
         val dir = file.parentFile ?: return
         if (!dir.exists()) dir.mkdirs()
@@ -1919,6 +2024,7 @@ class WalletManager(
 
         // Import cache best-effort, then snapshot status.
         importCacheIfPresent(meta.walletId)
+        recoverPendingPreparedSendBestEffort(meta.walletId)
         updateStatusSnapshot(meta.walletId)
         refreshWalletDataSnapshotsNow(meta.walletId)
 
@@ -1944,6 +2050,10 @@ class WalletManager(
         runCatching {
             val c = cacheFile(DEFAULT_WALLET_ID, mainnet = true)
             if (c.exists()) c.delete()
+        }
+        runCatching {
+            val p = preparedFile(DEFAULT_WALLET_ID, mainnet = true)
+            if (p.exists()) p.delete()
         }
         runCatching {
             val r = receiveSubaddressesFile()

@@ -391,6 +391,39 @@ object WalletCore {
         return WalletCoreJni.send(walletId, nodeUrl, toAddress, amountPiconero, ringLen)
     }
 
+    /**
+     * Prepare (build+sign) a single-destination send without broadcasting.
+     * Returns JSON: { "txid", "amount", "fee", "signed_tx_hex" }.
+     */
+    @JvmStatic
+    fun prepareSendJson(
+        walletId: String,
+        toAddress: String,
+        amountPiconero: Long,
+        ringLen: Int = 16,
+        nodeUrl: String? = null,
+    ): String {
+        require(walletId.isNotBlank()) { "walletId must not be blank" }
+        require(toAddress.isNotBlank()) { "toAddress must not be blank" }
+        require(amountPiconero > 0) { "amountPiconero must be > 0" }
+        require(ringLen in 1..255) { "ringLen must be 1..255" }
+        return WalletCoreJni.prepareSend(walletId, nodeUrl, toAddress, amountPiconero, ringLen)
+    }
+
+    /**
+     * Relay a previously prepared payload. Idempotent: returns status "accepted" or "already_known".
+     */
+    @JvmStatic
+    fun relayPreparedJson(
+        walletId: String,
+        preparedJson: String,
+        nodeUrl: String? = null,
+    ): String {
+        require(walletId.isNotBlank()) { "walletId must not be blank" }
+        require(preparedJson.isNotBlank()) { "preparedJson must not be blank" }
+        return WalletCoreJni.relayPrepared(walletId, nodeUrl, preparedJson)
+    }
+
     @JvmStatic
     fun sendJsonWithFilter(
         walletId: String,
@@ -586,6 +619,14 @@ internal object WalletCoreJni {
     ): String
 
     external fun send(walletId: String, nodeUrl: String?, toAddress: String, amountPiconero: Long, ringLen: Int): String
+    external fun prepareSend(
+        walletId: String,
+        nodeUrl: String?,
+        toAddress: String,
+        amountPiconero: Long,
+        ringLen: Int
+    ): String
+    external fun relayPrepared(walletId: String, nodeUrl: String?, preparedJson: String): String
     external fun sendWithFilter(
         walletId: String,
         nodeUrl: String?,

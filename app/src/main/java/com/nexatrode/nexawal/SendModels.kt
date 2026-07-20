@@ -15,6 +15,8 @@ import com.nexatrode.nexawal.walletcore.WalletCore as WalletCoreApi
  * These DTOs match the walletcore C-ABI JSON schemas:
  * - wallet_preview_fee -> { "fee": <uint64> }
  * - wallet_send        -> { "txid": "<hex>", "fee": <uint64> }
+ * - wallet_prepare_send -> { "txid", "amount", "fee", "signed_tx_hex" }
+ * - wallet_relay_prepared -> { "txid", "status": "accepted"|"already_known" }
  * - wallet_preview_sweep -> { "amount": <uint64>, "fee": <uint64> }
  * - wallet_sweep         -> { "txid": "<hex>", "amount": <uint64>, "fee": <uint64> }
  *
@@ -55,6 +57,29 @@ object SendJson {
     }
 
     @Serializable
+    data class PreparedSend(
+        val txid: String,
+        val amount: Long,
+        val fee: Long,
+        @kotlinx.serialization.SerialName("signed_tx_hex")
+        val signedTxHex: String,
+    )
+
+    @Serializable
+    data class RelayResult(
+        val txid: String,
+        val status: String,
+    )
+
+    /** Durable envelope written under WalletCaches before relay. */
+    @Serializable
+    data class PendingPreparedEnvelope(
+        val nodeUrl: String,
+        val prepared: PreparedSend,
+        val createdAtMs: Long = System.currentTimeMillis(),
+    )
+
+    @Serializable
     data class SweepPreviewResult(
         val amount: Long,
         val fee: Long,
@@ -88,6 +113,21 @@ object SendJson {
 
     fun decodeSendResult(raw: String): SendResult =
         json.decodeFromString(SendResult.serializer(), raw)
+
+    fun decodePreparedSend(raw: String): PreparedSend =
+        json.decodeFromString(PreparedSend.serializer(), raw)
+
+    fun encodePreparedSend(prepared: PreparedSend): String =
+        json.encodeToString(PreparedSend.serializer(), prepared)
+
+    fun decodeRelayResult(raw: String): RelayResult =
+        json.decodeFromString(RelayResult.serializer(), raw)
+
+    fun encodePendingPreparedEnvelope(envelope: PendingPreparedEnvelope): String =
+        json.encodeToString(PendingPreparedEnvelope.serializer(), envelope)
+
+    fun decodePendingPreparedEnvelope(raw: String): PendingPreparedEnvelope =
+        json.decodeFromString(PendingPreparedEnvelope.serializer(), raw)
 
     fun decodeSweepPreviewResult(raw: String): SweepPreviewResult =
         json.decodeFromString(SweepPreviewResult.serializer(), raw)

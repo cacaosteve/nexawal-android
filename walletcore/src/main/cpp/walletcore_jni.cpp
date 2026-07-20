@@ -700,6 +700,68 @@ Java_com_nexatrode_nexawal_walletcore_WalletCoreJni_send(
     return cstr_to_jstring_and_free(env, json);
 }
 
+// Kotlin/Java signature:
+//   internal object WalletCoreJni { external fun prepareSend(walletId: String, nodeUrl: String?, toAddress: String, amountPiconero: Long, ringLen: Int): String }
+JNIEXPORT jstring JNICALL
+Java_com_nexatrode_nexawal_walletcore_WalletCoreJni_prepareSend(
+    JNIEnv* env,
+    jclass /*clazz*/,
+    jstring walletId,
+    jstring nodeUrl,
+    jstring toAddress,
+    jlong amountPiconero,
+    jint ringLen
+) {
+    const std::string wid = jstring_to_std_string(env, walletId);
+    const std::string url = jstring_to_std_string(env, nodeUrl);
+    const std::string addr = jstring_to_std_string(env, toAddress);
+
+    const char* url_ptr = nodeUrl == nullptr ? nullptr : url.c_str();
+
+    char* json = wallet_prepare_send(
+        wid.c_str(),
+        url_ptr,
+        addr.c_str(),
+        static_cast<uint64_t>(amountPiconero),
+        static_cast<uint8_t>(ringLen)
+    );
+
+    if (json == nullptr) {
+        throw_walletcore_exception(env, "wallet_prepare_send", -1);
+        return nullptr;
+    }
+    return cstr_to_jstring_and_free(env, json);
+}
+
+// Kotlin/Java signature:
+//   internal object WalletCoreJni { external fun relayPrepared(walletId: String, nodeUrl: String?, preparedJson: String): String }
+JNIEXPORT jstring JNICALL
+Java_com_nexatrode_nexawal_walletcore_WalletCoreJni_relayPrepared(
+    JNIEnv* env,
+    jclass /*clazz*/,
+    jstring walletId,
+    jstring nodeUrl,
+    jstring preparedJson
+) {
+    const std::string wid = jstring_to_std_string(env, walletId);
+    const std::string url = jstring_to_std_string(env, nodeUrl);
+    const std::string payload = jstring_to_std_string(env, preparedJson);
+
+    const char* url_ptr = nodeUrl == nullptr ? nullptr : url.c_str();
+
+    char* json = wallet_relay_prepared(
+        wid.c_str(),
+        url_ptr,
+        payload.c_str()
+    );
+
+    if (json == nullptr) {
+        throw_walletcore_exception(env, "wallet_relay_prepared", -1);
+        return nullptr;
+    }
+    return cstr_to_jstring_and_free(env, json);
+}
+
 JNIEXPORT jstring JNICALL
 Java_com_nexatrode_nexawal_walletcore_WalletCoreJni_sendWithFilter(
     JNIEnv* env,
