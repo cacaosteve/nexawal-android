@@ -1485,9 +1485,11 @@ private fun SendScreen(walletManager: WalletManager, palette: NexaPalette) {
     fun hasUnlockedForExactSend(): Boolean {
         val amount = amountPiconeroOrNull() ?: return false
         val fee = estimatedFee?.fee ?: return false
-        if (amount < 0L || fee < 0L) return false
-        if (amount > unlockedPiconero) return false
-        return fee <= unlockedPiconero - amount
+        return com.nexatrode.nexawal.logic.SendSafety.hasUnlockedForExactSend(
+            amountPiconero = amount,
+            feePiconero = fee,
+            unlockedPiconero = unlockedPiconero,
+        )
     }
     fun canSendExact(): Boolean = canPreviewFee() && estimatedFee != null && hasUnlockedForExactSend()
     fun canSendMax(): Boolean = hasWallet && toAddress.trim().isNotEmpty() && !isEstimating && !isSending
@@ -1880,8 +1882,11 @@ private fun SendScreen(walletManager: WalletManager, palette: NexaPalette) {
                             try {
                                 val amountPiconeroNow = parseXmrToPiconero(amountXmrText)
                                 val feePiconero = estimatedFee?.fee ?: 0L
-                                if (amountPiconeroNow > unlockedPiconero ||
-                                    feePiconero > unlockedPiconero - amountPiconeroNow
+                                if (!com.nexatrode.nexawal.logic.SendSafety.hasUnlockedForExactSend(
+                                        amountPiconero = amountPiconeroNow,
+                                        feePiconero = feePiconero,
+                                        unlockedPiconero = unlockedPiconero,
+                                    )
                                 ) {
                                     errorText = "Insufficient unlocked balance for amount + fee."
                                     return@launch

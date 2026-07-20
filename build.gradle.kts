@@ -9,6 +9,9 @@ plugins {
     // Kotlin Android plugin for library module
     alias(libs.plugins.kotlin.android) apply false
 
+    // Pure JVM logic module (unit-testable without NDK)
+    alias(libs.plugins.kotlin.jvm) apply false
+
     // Compose stays app-only for now
     alias(libs.plugins.kotlin.compose) apply false
 }

@@ -3,6 +3,7 @@ package com.nexatrode.nexawal
 import android.util.Log
 
 import android.content.Context
+import com.nexatrode.nexawal.logic.SendGate
 import com.nexatrode.nexawal.walletcore.WalletCore
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
@@ -176,7 +177,7 @@ class WalletManager(
     private var refreshJob: Job? = null
     private val refreshCancelRequested = AtomicBoolean(false)
     private val refreshInProgress = AtomicBoolean(false)
-    private val sendInFlight = AtomicBoolean(false)
+    private val sendGate = SendGate()
 
     // Cache export throttling:
     // - avoid redundant writes when exportCache returns identical bytes repeatedly (common during steady-state polling)
@@ -272,13 +273,13 @@ class WalletManager(
     }
 
     private suspend fun <T> withSendLock(block: suspend () -> T): T {
-        if (!sendInFlight.compareAndSet(false, true)) {
-            throw IllegalStateException("A send is already in progress. Wait for it to finish.")
+        if (!sendGate.tryBegin()) {
+            throw IllegalStateException(SendGate.ALREADY_IN_PROGRESS)
         }
         return try {
             block()
         } finally {
-            sendInFlight.set(false)
+            sendGate.end()
         }
     }
 

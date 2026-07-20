@@ -2,6 +2,7 @@ package com.nexatrode.nexawal
 
 import android.content.Context
 import android.content.SharedPreferences
+import com.nexatrode.nexawal.logic.NetworkRouting
 import kotlin.math.max
 import kotlin.math.min
 
@@ -187,32 +188,40 @@ object MoneroConfig {
         edit.apply()
     }
 
-    @JvmStatic
-    fun broadcastNodeUrl(context: Context, currentNodeUrl: String): String {
-        return when (networkPolicy(context)) {
-            NetworkPolicy.CLEARNET -> currentNodeUrl
-            NetworkPolicy.I2P, NetworkPolicy.HYBRID -> normalizeUrl(i2pRpcAddress(context))
+    private fun toRoutingPolicy(policy: NetworkPolicy): NetworkRouting.Policy {
+        return when (policy) {
+            NetworkPolicy.CLEARNET -> NetworkRouting.Policy.CLEARNET
+            NetworkPolicy.I2P -> NetworkRouting.Policy.I2P
+            NetworkPolicy.HYBRID -> NetworkRouting.Policy.HYBRID
         }
     }
 
     @JvmStatic
+    fun broadcastNodeUrl(context: Context, currentNodeUrl: String): String {
+        return NetworkRouting.broadcastNodeUrl(
+            policy = toRoutingPolicy(networkPolicy(context)),
+            clearnetNodeUrl = currentNodeUrl,
+            i2pRpcAddress = i2pRpcAddress(context),
+        )
+    }
+
+    @JvmStatic
     fun scanNodeUrl(context: Context, currentNodeUrl: String): String {
-        return when (networkPolicy(context)) {
-            NetworkPolicy.CLEARNET, NetworkPolicy.HYBRID -> currentNodeUrl
-            NetworkPolicy.I2P -> normalizeUrl(i2pRpcAddress(context))
-        }
+        return NetworkRouting.scanNodeUrl(
+            policy = toRoutingPolicy(networkPolicy(context)),
+            clearnetNodeUrl = currentNodeUrl,
+            i2pRpcAddress = i2pRpcAddress(context),
+        )
     }
 
     /** True when daemon RPC for this policy should go through the I2P HTTP proxy. */
     @JvmStatic
     fun shouldUseI2pHttpProxy(context: Context, forBroadcast: Boolean): Boolean {
-        val proxy = i2pHttpProxyAddress(context)
-        if (proxy.isNullOrBlank()) return false
-        return when (networkPolicy(context)) {
-            NetworkPolicy.CLEARNET -> false
-            NetworkPolicy.I2P -> true
-            NetworkPolicy.HYBRID -> forBroadcast
-        }
+        return NetworkRouting.shouldUseI2pHttpProxy(
+            policy = toRoutingPolicy(networkPolicy(context)),
+            proxyConfigured = !i2pHttpProxyAddress(context).isNullOrBlank(),
+            forBroadcast = forBroadcast,
+        )
     }
 
     /**
@@ -257,11 +266,4 @@ object MoneroConfig {
 
     private fun clamp(v: Int, lo: Int, hi: Int): Int = max(lo, min(v, hi))
 
-    private fun normalizeUrl(raw: String): String {
-        val trimmed = raw.trim()
-        if (trimmed.startsWith("http://", ignoreCase = true) || trimmed.startsWith("https://", ignoreCase = true)) {
-            return trimmed
-        }
-        return if (trimmed.endsWith(":443")) "https://$trimmed" else "http://$trimmed"
-    }
 }

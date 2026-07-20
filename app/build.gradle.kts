@@ -39,6 +39,7 @@ android {
 }
 
 dependencies {
+    implementation(project(":logic"))
     implementation(project(":walletcore"))
     implementation(project(":walletcore-api"))
 

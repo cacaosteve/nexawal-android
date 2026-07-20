@@ -24,5 +24,6 @@ dependencyResolutionManagement {
 
 rootProject.name = "nexawal"
 include(":app")
+include(":logic")
 include(":walletcore")
 include(":walletcore-api")
