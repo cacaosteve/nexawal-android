@@ -1262,21 +1262,8 @@ class WalletManager(
                 )
             }
             val prepared = SendJson.decodePreparedSend(preparedRaw)
-            persistPendingPrepared(walletId, usedEndpoint, prepared)
-
-            val relayRaw = WalletCore.relayPreparedJson(
-                walletId = walletId,
-                preparedJson = SendJson.encodePreparedSend(prepared),
-                nodeUrl = usedEndpoint,
-            )
-            val relay = SendJson.decodeRelayResult(relayRaw)
-            clearPendingPrepared(walletId)
-
-            Log.i(
-                "WalletManager",
-                "prepare→relay ok txid=${relay.txid} status=${relay.status} fee=${prepared.fee} endpoint=$usedEndpoint",
-            )
-            SendJson.SendResult(txid = relay.txid, fee = prepared.fee)
+            persistAndRelayPrepared(walletId, usedEndpoint, prepared)
+                .let { SendJson.SendResult(txid = it.txid, fee = it.fee) }
         }
 
         // Persist immediately so pending outgoing survives restart before next refresh.
@@ -1306,10 +1293,12 @@ class WalletManager(
         val walletId = _state.value.walletId ?: throw IllegalStateException("No wallet open")
         val nodeUrl = resolveBroadcastNodeUrl()
 
-        val raw = withContext(ioDispatcher) {
+        val res = withContext(ioDispatcher) {
             applyProxyEnv(forBroadcast = true)
-            withOptionalSiblingFeeRetry(nodeUrl) { endpoint ->
-                WalletCore.sendJsonWithFilter(
+            completePendingPreparedSend(walletId, preferredNodeUrl = nodeUrl)
+
+            val (preparedRaw, usedEndpoint) = withOptionalSiblingFeeRetryReturningEndpoint(nodeUrl) { endpoint ->
+                WalletCore.prepareSendJsonWithFilter(
                     walletId = walletId,
                     destinationsJson = SendJson.encodeDestinations(
                         listOf(
@@ -1324,8 +1313,9 @@ class WalletManager(
                     nodeUrl = endpoint,
                 )
             }
+            persistAndRelayPrepared(walletId, usedEndpoint, SendJson.decodePreparedSend(preparedRaw))
+                .let { SendJson.SendResult(txid = it.txid, fee = it.fee) }
         }
-        val res = SendJson.decodeSendResult(raw)
 
         withContext(ioDispatcher) {
             exportCacheAndPersist(walletId)
@@ -1407,8 +1397,7 @@ class WalletManager(
     /**
      * Sweep ("send max") to a destination.
      *
-     * Important: mirrors iOS behavior by persisting cache immediately after sweep so the pending
-     * outgoing survives process death / restart.
+     * Uses prepare → durable persist → relay (same crash window protection as exact send).
      */
     suspend fun sweep(
         toAddress: String,
@@ -1417,20 +1406,24 @@ class WalletManager(
         val walletId = _state.value.walletId ?: throw IllegalStateException("No wallet open")
         val nodeUrl = resolveBroadcastNodeUrl()
 
-        val raw = withContext(ioDispatcher) {
+        val res = withContext(ioDispatcher) {
             applyProxyEnv(forBroadcast = true)
-            withOptionalSiblingFeeRetry(nodeUrl) { endpoint ->
-                WalletCore.sweepJson(
+            completePendingPreparedSend(walletId, preferredNodeUrl = nodeUrl)
+
+            val (preparedRaw, usedEndpoint) = withOptionalSiblingFeeRetryReturningEndpoint(nodeUrl) { endpoint ->
+                WalletCore.prepareSweepJson(
                     walletId = walletId,
                     toAddress = toAddress,
                     ringLen = ringLen,
                     nodeUrl = endpoint,
                 )
             }
+            persistAndRelayPrepared(walletId, usedEndpoint, SendJson.decodePreparedSend(preparedRaw))
+                .let {
+                    SendJson.SweepSendResult(txid = it.txid, amount = it.amount, fee = it.fee)
+                }
         }
-        val res = SendJson.decodeSweepSendResult(raw)
 
-        // Persist immediately so pending outgoing survives restart before next refresh.
         withContext(ioDispatcher) {
             exportCacheAndPersist(walletId)
         }
@@ -1441,7 +1434,6 @@ class WalletManager(
             lastSendOrSweepAtMs = System.currentTimeMillis(),
         )
 
-        // Best-effort: refresh visible data snapshots (balance/transfers) after sweep.
         refreshWalletDataSnapshotsNow(walletId)
 
         res
@@ -1456,10 +1448,12 @@ class WalletManager(
         val walletId = _state.value.walletId ?: throw IllegalStateException("No wallet open")
         val nodeUrl = resolveBroadcastNodeUrl()
 
-        val raw = withContext(ioDispatcher) {
+        val res = withContext(ioDispatcher) {
             applyProxyEnv(forBroadcast = true)
-            withOptionalSiblingFeeRetry(nodeUrl) { endpoint ->
-                WalletCore.sweepJsonWithFilter(
+            completePendingPreparedSend(walletId, preferredNodeUrl = nodeUrl)
+
+            val (preparedRaw, usedEndpoint) = withOptionalSiblingFeeRetryReturningEndpoint(nodeUrl) { endpoint ->
+                WalletCore.prepareSweepJsonWithFilter(
                     walletId = walletId,
                     toAddress = toAddress,
                     filterJson = filterJsonForSubaddressMinor(fromSubaddressMinor),
@@ -1467,8 +1461,11 @@ class WalletManager(
                     nodeUrl = endpoint,
                 )
             }
+            persistAndRelayPrepared(walletId, usedEndpoint, SendJson.decodePreparedSend(preparedRaw))
+                .let {
+                    SendJson.SweepSendResult(txid = it.txid, amount = it.amount, fee = it.fee)
+                }
         }
-        val res = SendJson.decodeSweepSendResult(raw)
 
         withContext(ioDispatcher) {
             exportCacheAndPersist(walletId)
@@ -1806,6 +1803,26 @@ class WalletManager(
             "WalletManager",
             "Recovered pending prepared send txid=${relay.txid} status=${relay.status}",
         )
+    }
+
+    private fun persistAndRelayPrepared(
+        walletId: String,
+        usedEndpoint: String,
+        prepared: SendJson.PreparedSend,
+    ): SendJson.PreparedSend {
+        persistPendingPrepared(walletId, usedEndpoint, prepared)
+        val relayRaw = WalletCore.relayPreparedJson(
+            walletId = walletId,
+            preparedJson = SendJson.encodePreparedSend(prepared),
+            nodeUrl = usedEndpoint,
+        )
+        val relay = SendJson.decodeRelayResult(relayRaw)
+        clearPendingPrepared(walletId)
+        Log.i(
+            "WalletManager",
+            "prepare→relay ok txid=${relay.txid} status=${relay.status} fee=${prepared.fee} endpoint=$usedEndpoint",
+        )
+        return prepared.copy(txid = relay.txid)
     }
 
     private fun recoverPendingPreparedSendBestEffort(walletId: String) {

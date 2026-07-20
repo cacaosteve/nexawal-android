@@ -410,6 +410,20 @@ object WalletCore {
         return WalletCoreJni.prepareSend(walletId, nodeUrl, toAddress, amountPiconero, ringLen)
     }
 
+    @JvmStatic
+    fun prepareSendJsonWithFilter(
+        walletId: String,
+        destinationsJson: String,
+        filterJson: String? = null,
+        ringLen: Int = 16,
+        nodeUrl: String? = null,
+    ): String {
+        require(walletId.isNotBlank()) { "walletId must not be blank" }
+        require(destinationsJson.isNotBlank()) { "destinationsJson must not be blank" }
+        require(ringLen in 1..255) { "ringLen must be 1..255" }
+        return WalletCoreJni.prepareSendWithFilter(walletId, nodeUrl, destinationsJson, filterJson, ringLen)
+    }
+
     /**
      * Relay a previously prepared payload. Idempotent: returns status "accepted" or "already_known".
      */
@@ -463,6 +477,33 @@ object WalletCore {
         require(toAddress.isNotBlank()) { "toAddress must not be blank" }
         require(ringLen in 1..255) { "ringLen must be 1..255" }
         return WalletCoreJni.previewSweepWithFilter(walletId, nodeUrl, toAddress, filterJson, ringLen)
+    }
+
+    @JvmStatic
+    fun prepareSweepJson(
+        walletId: String,
+        toAddress: String,
+        ringLen: Int = 16,
+        nodeUrl: String? = null,
+    ): String {
+        require(walletId.isNotBlank()) { "walletId must not be blank" }
+        require(toAddress.isNotBlank()) { "toAddress must not be blank" }
+        require(ringLen in 1..255) { "ringLen must be 1..255" }
+        return WalletCoreJni.prepareSweep(walletId, nodeUrl, toAddress, ringLen)
+    }
+
+    @JvmStatic
+    fun prepareSweepJsonWithFilter(
+        walletId: String,
+        toAddress: String,
+        filterJson: String? = null,
+        ringLen: Int = 16,
+        nodeUrl: String? = null,
+    ): String {
+        require(walletId.isNotBlank()) { "walletId must not be blank" }
+        require(toAddress.isNotBlank()) { "toAddress must not be blank" }
+        require(ringLen in 1..255) { "ringLen must be 1..255" }
+        return WalletCoreJni.prepareSweepWithFilter(walletId, nodeUrl, toAddress, filterJson, ringLen)
     }
 
     @JvmStatic
@@ -626,6 +667,13 @@ internal object WalletCoreJni {
         amountPiconero: Long,
         ringLen: Int
     ): String
+    external fun prepareSendWithFilter(
+        walletId: String,
+        nodeUrl: String?,
+        destinationsJson: String,
+        filterJson: String?,
+        ringLen: Int
+    ): String
     external fun relayPrepared(walletId: String, nodeUrl: String?, preparedJson: String): String
     external fun sendWithFilter(
         walletId: String,
@@ -644,6 +692,14 @@ internal object WalletCoreJni {
         ringLen: Int
     ): String
 
+    external fun prepareSweep(walletId: String, nodeUrl: String?, toAddress: String, ringLen: Int): String
+    external fun prepareSweepWithFilter(
+        walletId: String,
+        nodeUrl: String?,
+        toAddress: String,
+        filterJson: String?,
+        ringLen: Int
+    ): String
     external fun sweep(walletId: String, nodeUrl: String?, toAddress: String, ringLen: Int): String
     external fun sweepWithFilter(
         walletId: String,

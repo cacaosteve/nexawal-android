@@ -763,6 +763,101 @@ Java_com_nexatrode_nexawal_walletcore_WalletCoreJni_relayPrepared(
 }
 
 JNIEXPORT jstring JNICALL
+Java_com_nexatrode_nexawal_walletcore_WalletCoreJni_prepareSendWithFilter(
+    JNIEnv* env,
+    jclass /*clazz*/,
+    jstring walletId,
+    jstring nodeUrl,
+    jstring destinationsJson,
+    jstring filterJson,
+    jint ringLen
+) {
+    const std::string wid = jstring_to_std_string(env, walletId);
+    const std::string url = jstring_to_std_string(env, nodeUrl);
+    const std::string dests = jstring_to_std_string(env, destinationsJson);
+    const std::string filter = jstring_to_std_string(env, filterJson);
+
+    const char* url_ptr = nodeUrl == nullptr ? nullptr : url.c_str();
+    const char* filter_ptr = filterJson == nullptr ? nullptr : filter.c_str();
+
+    char* json = wallet_prepare_send_with_filter(
+        wid.c_str(),
+        url_ptr,
+        dests.c_str(),
+        filter_ptr,
+        static_cast<uint8_t>(ringLen)
+    );
+
+    if (json == nullptr) {
+        throw_walletcore_exception(env, "wallet_prepare_send_with_filter", -1);
+        return nullptr;
+    }
+    return cstr_to_jstring_and_free(env, json);
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_nexatrode_nexawal_walletcore_WalletCoreJni_prepareSweep(
+    JNIEnv* env,
+    jclass /*clazz*/,
+    jstring walletId,
+    jstring nodeUrl,
+    jstring toAddress,
+    jint ringLen
+) {
+    const std::string wid = jstring_to_std_string(env, walletId);
+    const std::string url = jstring_to_std_string(env, nodeUrl);
+    const std::string addr = jstring_to_std_string(env, toAddress);
+
+    const char* url_ptr = nodeUrl == nullptr ? nullptr : url.c_str();
+
+    char* json = wallet_prepare_sweep(
+        wid.c_str(),
+        url_ptr,
+        addr.c_str(),
+        static_cast<uint8_t>(ringLen)
+    );
+
+    if (json == nullptr) {
+        throw_walletcore_exception(env, "wallet_prepare_sweep", -1);
+        return nullptr;
+    }
+    return cstr_to_jstring_and_free(env, json);
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_nexatrode_nexawal_walletcore_WalletCoreJni_prepareSweepWithFilter(
+    JNIEnv* env,
+    jclass /*clazz*/,
+    jstring walletId,
+    jstring nodeUrl,
+    jstring toAddress,
+    jstring filterJson,
+    jint ringLen
+) {
+    const std::string wid = jstring_to_std_string(env, walletId);
+    const std::string url = jstring_to_std_string(env, nodeUrl);
+    const std::string addr = jstring_to_std_string(env, toAddress);
+    const std::string filter = jstring_to_std_string(env, filterJson);
+
+    const char* url_ptr = nodeUrl == nullptr ? nullptr : url.c_str();
+    const char* filter_ptr = filterJson == nullptr ? nullptr : filter.c_str();
+
+    char* json = wallet_prepare_sweep_with_filter(
+        wid.c_str(),
+        url_ptr,
+        addr.c_str(),
+        filter_ptr,
+        static_cast<uint8_t>(ringLen)
+    );
+
+    if (json == nullptr) {
+        throw_walletcore_exception(env, "wallet_prepare_sweep_with_filter", -1);
+        return nullptr;
+    }
+    return cstr_to_jstring_and_free(env, json);
+}
+
+JNIEXPORT jstring JNICALL
 Java_com_nexatrode_nexawal_walletcore_WalletCoreJni_sendWithFilter(
     JNIEnv* env,
     jclass /*clazz*/,
