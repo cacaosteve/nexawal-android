@@ -50,7 +50,7 @@ class MainActivity : ComponentActivity() {
                         if (unlocked) {
                             val loaded = walletManager.loadStoredWalletOnLaunch()
                             if (loaded) {
-                                runCatching { walletManager.refreshWallet() }
+                                walletManager.refreshWalletInBackground()
                             }
                         }
                     }

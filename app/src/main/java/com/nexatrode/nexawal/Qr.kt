@@ -74,12 +74,16 @@ object MoneroQr {
      * @param sizePx output bitmap width/height in pixels (square)
      * @param margin QR "quiet zone" modules around the code (defaults to 1)
      * @param errorCorrection QR error correction level (defaults to M)
+     * @param foreground ARGB color for QR modules (defaults to black)
+     * @param background ARGB color for quiet zone (defaults to white)
      */
     fun qrBitmap(
         content: String,
         sizePx: Int = 512,
         margin: Int = 1,
         errorCorrection: ErrorCorrectionLevel = ErrorCorrectionLevel.M,
+        foreground: Int = Color.BLACK,
+        background: Int = Color.WHITE,
     ): Bitmap {
         val text = content.trim()
         require(text.isNotEmpty()) { "content must not be empty" }
@@ -99,7 +103,7 @@ object MoneroQr {
             hints
         )
 
-        return matrix.toBitmap()
+        return matrix.toBitmap(foreground = foreground, background = background)
     }
 }
 

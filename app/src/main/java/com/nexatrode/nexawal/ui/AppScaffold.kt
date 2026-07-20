@@ -4,15 +4,20 @@ import android.content.Intent
 import androidx.activity.ComponentActivity
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -22,6 +27,10 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Home
+import androidx.compose.material.icons.filled.ArrowDownward
+import androidx.compose.material.icons.filled.ArrowUpward
+import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material.icons.filled.QrCode
 import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.Settings
@@ -30,14 +39,20 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.ProgressIndicatorDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
+import androidx.compose.material3.darkColorScheme
+import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -46,10 +61,14 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
@@ -69,6 +88,7 @@ import androidx.navigation.compose.rememberNavController
 import com.nexatrode.nexawal.DeviceAuthGate
 import com.nexatrode.nexawal.MoneroConfig
 import com.nexatrode.nexawal.MoneroQr
+import com.nexatrode.nexawal.R
 import com.nexatrode.nexawal.WalletManager.ReceiveSubaddressEntry
 import com.nexatrode.nexawal.SendJson
 import com.nexatrode.nexawal.TimeFormat
@@ -76,13 +96,15 @@ import com.nexatrode.nexawal.Transfer
 import com.nexatrode.nexawal.WalletManager
 import com.nexatrode.nexawal.XmrFormat
 import com.nexatrode.nexawal.walletcore.WalletCore
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileOutputStream
 import java.text.NumberFormat
 
-private data class NexaPalette(
+internal data class NexaPalette(
     val background: Color,
     val card: Color,
     val primaryText: Color,
@@ -90,21 +112,72 @@ private data class NexaPalette(
     val separator: Color,
     val accent: Color,
     val secondaryAction: Color,
+    val success: Color,
+    val danger: Color,
+    val border: Color,
+    val cta: Color,
+    val ctaText: Color,
+    val classic: Boolean, // true == neon terminal theme
 )
 
 @Composable
-private fun rememberNexaPalette(): NexaPalette {
+internal fun rememberNexaPalette(classicUI: Boolean): NexaPalette {
     val dark = isSystemInDarkTheme()
-    return remember(dark) {
-        NexaPalette(
-            background = if (dark) Color(0xFF0B0F14) else Color(0xFFF2F2F7),
-            card = if (dark) Color(0xFF171C22) else Color(0xFFFFFFFF),
-            primaryText = if (dark) Color(0xFFF5F7FA) else Color(0xFF111111),
-            secondaryText = if (dark) Color(0xFF8E98AA) else Color(0xFF6D6D72),
-            separator = if (dark) Color(0xFF262D36) else Color(0xFFE5E5EA),
-            accent = Color(0xFFFF6B35),
-            secondaryAction = if (dark) Color(0xFF242B35) else Color(0xFFF5F6FA),
-        )
+    // Classic UI setting ON = non-neon standard look.
+    // Setting OFF (default) = neon terminal theme (`palette.classic == true`).
+    val neon = !classicUI
+    return remember(dark, neon) {
+        if (neon) {
+            if (dark) {
+                NexaPalette(
+                    background = Color(0xFF000000),
+                    card = Color(0xFF0A0F0A),
+                    primaryText = Color(0xFF39FF14),
+                    secondaryText = Color(0xFF59BF66),
+                    separator = Color(0xFF1A3D1A),
+                    accent = Color(0xFF39FF14),
+                    secondaryAction = Color(0xFF0A0F0A),
+                    success = Color(0xFF39FF14),
+                    danger = Color(0xFFFF5959),
+                    border = Color(0xFF00E676),
+                    cta = Color(0xFF39FF14),
+                    ctaText = Color(0xFF001A12),
+                    classic = true,
+                )
+            } else {
+                NexaPalette(
+                    background = Color(0xFFF2F4F2),
+                    card = Color(0xFFFFFFFF),
+                    primaryText = Color(0xFF0D2E14),
+                    secondaryText = Color(0xFF406648),
+                    separator = Color(0xFFC8DCC8),
+                    accent = Color(0xFF0A7A2F),
+                    secondaryAction = Color(0xFFFFFFFF),
+                    success = Color(0xFF0A7A2F),
+                    danger = Color(0xFFB31E1E),
+                    border = Color(0xFF0A7A2F),
+                    cta = Color(0xFF0A7A2F),
+                    ctaText = Color(0xFFFFFFFF),
+                    classic = true,
+                )
+            }
+        } else {
+            NexaPalette(
+                background = if (dark) Color(0xFF0B0F14) else Color(0xFFF2F2F7),
+                card = if (dark) Color(0xFF171C22) else Color(0xFFFFFFFF),
+                primaryText = if (dark) Color(0xFFF5F7FA) else Color(0xFF111111),
+                secondaryText = if (dark) Color(0xFF8E98AA) else Color(0xFF6D6D72),
+                separator = if (dark) Color(0xFF262D36) else Color(0xFFE5E5EA),
+                accent = Color(0xFFFF6B35),
+                secondaryAction = if (dark) Color(0xFF242B35) else Color(0xFFF5F6FA),
+                success = Color(0xFF34C759),
+                danger = Color(0xFFFF3B30),
+                border = if (dark) Color(0xFF262D36) else Color(0xFFE5E5EA),
+                cta = Color(0xFFFF6B35),
+                ctaText = Color(0xFFFFFFFF),
+                classic = false,
+            )
+        }
     }
 }
 
@@ -114,56 +187,136 @@ private fun ScreenHeading(
     subtitle: String,
     palette: NexaPalette,
 ) {
-    Text(title, fontSize = 28.sp, fontWeight = FontWeight.Bold, color = palette.primaryText)
+    Text(title, fontSize = 30.sp, fontWeight = FontWeight.Bold, color = palette.primaryText)
     Spacer(Modifier.height(6.dp))
-    Text(subtitle, color = palette.secondaryText)
+    Text(subtitle, color = palette.secondaryText, fontSize = 15.sp, lineHeight = 21.sp)
 }
 
 @Composable
 private fun SectionLabel(text: String, palette: NexaPalette) {
-    Text(text, color = palette.secondaryText, fontWeight = FontWeight.Medium)
+    Text(text, color = palette.secondaryText, fontWeight = FontWeight.Medium, fontSize = 13.sp)
+}
+
+@Composable
+private fun SectionCard(
+    palette: NexaPalette,
+    modifier: Modifier = Modifier,
+    content: @Composable () -> Unit,
+) {
+    val shape = RoundedCornerShape(if (palette.classic) 4.dp else 16.dp)
+    Surface(
+        modifier = modifier.fillMaxWidth(),
+        color = palette.card,
+        shape = shape,
+        tonalElevation = if (palette.classic) 0.dp else 1.dp,
+        shadowElevation = 0.dp,
+        border = if (palette.classic) BorderStroke(1.dp, palette.border) else null,
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            content()
+        }
+    }
 }
 
 private fun formatGrouped(value: Long): String = NumberFormat.getIntegerInstance().format(value)
 
 @Composable
-private fun PrimaryActionButton(
-    text: String,
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier,
-    enabled: Boolean = true,
-) {
-    Button(
-        onClick = onClick,
-        enabled = enabled,
-        modifier = modifier,
-        colors = ButtonDefaults.buttonColors(
-            containerColor = Color(0xFFFF6B35),
-            contentColor = Color.White
-        )
-    ) {
-        Text(text)
-    }
+internal fun rememberAppPalette(classicUI: Boolean = MoneroConfig.isClassicUIEnabled(LocalContext.current)): NexaPalette {
+    return rememberNexaPalette(classicUI)
 }
 
 @Composable
-private fun SecondaryActionButton(
+internal fun nexaFieldColors(palette: NexaPalette) = OutlinedTextFieldDefaults.colors(
+    focusedTextColor = palette.primaryText,
+    unfocusedTextColor = palette.primaryText,
+    disabledTextColor = palette.secondaryText,
+    focusedBorderColor = palette.border,
+    unfocusedBorderColor = palette.separator,
+    disabledBorderColor = palette.separator,
+    cursorColor = palette.accent,
+    focusedLabelColor = palette.secondaryText,
+    unfocusedLabelColor = palette.secondaryText,
+    focusedPlaceholderColor = palette.secondaryText,
+    unfocusedPlaceholderColor = palette.secondaryText,
+    focusedContainerColor = palette.card,
+    unfocusedContainerColor = palette.card,
+)
+
+@Composable
+internal fun nexaSwitchColors(palette: NexaPalette) = SwitchDefaults.colors(
+    checkedThumbColor = palette.ctaText,
+    checkedTrackColor = palette.accent,
+    checkedBorderColor = palette.border,
+    uncheckedThumbColor = palette.secondaryText,
+    uncheckedTrackColor = palette.separator,
+    uncheckedBorderColor = palette.separator,
+)
+
+@Composable
+internal fun PrimaryActionButton(
     text: String,
     onClick: () -> Unit,
     palette: NexaPalette,
     modifier: Modifier = Modifier,
     enabled: Boolean = true,
 ) {
+    val neon = palette.classic
+    val container = if (neon) palette.cta else Color(0xFFFF6B35)
+    val content = if (neon) palette.ctaText else Color.White
     Button(
         onClick = onClick,
         enabled = enabled,
-        modifier = modifier,
+        modifier = modifier.height(54.dp),
+        shape = RoundedCornerShape(if (neon) 28.dp else 14.dp),
+        border = if (neon) BorderStroke(1.dp, palette.border.copy(alpha = 0.35f)) else null,
         colors = ButtonDefaults.buttonColors(
-            containerColor = palette.secondaryAction,
-            contentColor = palette.primaryText
+            containerColor = container,
+            contentColor = content,
+            disabledContainerColor = if (neon) Color(0xFF1A1F1A) else Color(0xFFFF6B35).copy(alpha = 0.4f),
+            disabledContentColor = if (neon) palette.secondaryText.copy(alpha = 0.5f) else Color.White.copy(alpha = 0.7f),
         )
     ) {
-        Text(text)
+        Text(
+            text,
+            color = if (enabled) content else (if (neon) palette.secondaryText.copy(alpha = 0.5f) else Color.White.copy(alpha = 0.7f)),
+            fontWeight = FontWeight.SemiBold,
+            fontFamily = if (neon) FontFamily.Monospace else FontFamily.Default,
+        )
+    }
+}
+
+@Composable
+internal fun SecondaryActionButton(
+    text: String,
+    onClick: () -> Unit,
+    palette: NexaPalette,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+) {
+    val neon = palette.classic
+    Button(
+        onClick = onClick,
+        enabled = enabled,
+        modifier = modifier.height(54.dp),
+        shape = RoundedCornerShape(if (neon) 28.dp else 14.dp),
+        border = BorderStroke(if (neon) 1.dp else 1.dp, if (neon) palette.border else palette.separator),
+        colors = ButtonDefaults.buttonColors(
+            containerColor = if (neon) Color(0xFF121612) else palette.secondaryAction,
+            contentColor = if (neon) palette.accent else palette.primaryText,
+            disabledContainerColor = if (neon) Color(0xFF121612) else palette.secondaryAction.copy(alpha = 0.5f),
+            disabledContentColor = if (neon) palette.secondaryText.copy(alpha = 0.45f) else palette.primaryText.copy(alpha = 0.5f),
+        )
+    ) {
+        Text(
+            text,
+            color = if (enabled) {
+                if (neon) palette.accent else palette.primaryText
+            } else {
+                if (neon) palette.secondaryText.copy(alpha = 0.45f) else palette.primaryText.copy(alpha = 0.5f)
+            },
+            fontWeight = FontWeight.Medium,
+            fontFamily = if (neon) FontFamily.Monospace else FontFamily.Default,
+        )
     }
 }
 
@@ -176,7 +329,9 @@ fun AppScaffold(
     modifier: Modifier = Modifier,
 ) {
     val navController = rememberNavController()
-    val palette = rememberNexaPalette()
+    val context = LocalContext.current
+    var classicUI by remember { mutableStateOf(MoneroConfig.isClassicUIEnabled(context)) }
+    val palette = rememberNexaPalette(classicUI)
     val items = listOf(
         BottomNavItem.Wallet,
         BottomNavItem.Receive,
@@ -187,8 +342,46 @@ fun AppScaffold(
     val navBackStackEntry by navController.currentBackStackEntryAsState()
     val currentDestination = navBackStackEntry?.destination
 
+    val neonScheme = if (palette.classic) {
+        if (isSystemInDarkTheme()) {
+            darkColorScheme(
+                primary = palette.accent,
+                onPrimary = palette.ctaText,
+                secondary = palette.border,
+                onSecondary = palette.ctaText,
+                tertiary = palette.accent,
+                background = palette.background,
+                onBackground = palette.primaryText,
+                surface = palette.card,
+                onSurface = palette.primaryText,
+                surfaceVariant = palette.card,
+                onSurfaceVariant = palette.secondaryText,
+                outline = palette.border,
+            )
+        } else {
+            lightColorScheme(
+                primary = palette.accent,
+                onPrimary = palette.ctaText,
+                secondary = palette.border,
+                onSecondary = Color.White,
+                tertiary = palette.accent,
+                background = palette.background,
+                onBackground = palette.primaryText,
+                surface = palette.card,
+                onSurface = palette.primaryText,
+                surfaceVariant = palette.card,
+                onSurfaceVariant = palette.secondaryText,
+                outline = palette.border,
+            )
+        }
+    } else {
+        null
+    }
+
+    val scaffoldContent = @Composable {
     Scaffold(
         modifier = modifier.fillMaxSize(),
+        containerColor = palette.background,
         bottomBar = {
             NavigationBar(
                 containerColor = palette.card,
@@ -210,6 +403,13 @@ fun AppScaffold(
                                 restoreState = true
                             }
                         },
+                        colors = NavigationBarItemDefaults.colors(
+                            selectedIconColor = palette.accent,
+                            selectedTextColor = palette.primaryText,
+                            indicatorColor = palette.separator,
+                            unselectedIconColor = palette.secondaryText,
+                            unselectedTextColor = palette.secondaryText,
+                        ),
                         icon = {
                             Icon(
                                 imageVector = item.icon,
@@ -219,8 +419,10 @@ fun AppScaffold(
                         },
                         label = {
                             Text(
-                                item.label,
-                                color = if (selected) palette.primaryText else palette.secondaryText
+                                if (palette.classic) item.label.uppercase() else item.label,
+                                color = if (selected) palette.primaryText else palette.secondaryText,
+                                fontFamily = if (palette.classic) FontFamily.Monospace else FontFamily.Default,
+                                fontSize = if (palette.classic) 11.sp else 12.sp,
                             )
                         }
                     )
@@ -236,20 +438,35 @@ fun AppScaffold(
             composable(BottomNavItem.Wallet.route) {
                 WalletScreen(
                     walletManager = walletManager,
+                    palette = palette,
                     onOpenSend = { navController.navigate(BottomNavItem.Send.route) },
                     onOpenReceive = { navController.navigate(BottomNavItem.Receive.route) },
                 )
             }
             composable(BottomNavItem.Send.route) {
-                SendScreen(walletManager = walletManager)
+                SendScreen(walletManager = walletManager, palette = palette)
             }
             composable(BottomNavItem.Receive.route) {
-                ReceiveScreen(walletManager = walletManager)
+                ReceiveScreen(walletManager = walletManager, palette = palette)
             }
             composable(BottomNavItem.Settings.route) {
-                SettingsScreen(walletManager = walletManager)
+                SettingsScreen(
+                    walletManager = walletManager,
+                    classicUI = classicUI,
+                    onClassicUIChange = { enabled ->
+                        classicUI = enabled
+                        MoneroConfig.setClassicUIEnabled(context, enabled)
+                    },
+                )
             }
         }
+    }
+    }
+
+    if (neonScheme != null) {
+        MaterialTheme(colorScheme = neonScheme, content = scaffoldContent)
+    } else {
+        scaffoldContent()
     }
 }
 
@@ -294,13 +511,13 @@ private sealed class BottomNavItem(
 @Composable
 private fun WalletScreen(
     walletManager: WalletManager,
+    palette: NexaPalette,
     onOpenSend: () -> Unit,
     onOpenReceive: () -> Unit,
 ) {
     val scope = rememberCoroutineScope()
     val state by walletManager.state.collectAsState()
     val scroll = rememberScrollState()
-    val palette = rememberNexaPalette()
     var errorText by remember { mutableStateOf<String?>(null) }
     var statusText by remember { mutableStateOf<String?>(null) }
 
@@ -316,8 +533,8 @@ private fun WalletScreen(
         val walletId = state.walletId ?: return@LaunchedEffect
 
         var lastTransfersRefreshAtMs = 0L
-        val balanceIntervalMs = 2_000L
-        val transfersIntervalMs = 8_000L
+        val balanceIntervalMs = 60_000L
+        val transfersIntervalMs = 120_000L
 
         while (state.refreshInProgress) {
             val now = System.currentTimeMillis()
@@ -365,7 +582,8 @@ private fun WalletScreen(
     }
 
     val remainingBlocks = if (targetHeight > 0L) (targetHeight - lastScanned).coerceAtLeast(0L) else 0L
-    val isSynced = targetHeight > 0L && lastScanned >= targetHeight
+    val syncTolerance = 3L
+    val isSynced = targetHeight > 0L && lastScanned + syncTolerance >= targetHeight
 
     // iOS-like blocks/sec:
     // - compute instantaneous rate from lastScanned deltas
@@ -397,12 +615,13 @@ private fun WalletScreen(
 
     // iOS-like theme-aware colors (approximate).
     // We keep iOS "System Blue" consistent and vary backgrounds/secondary text with system theme.
-    val iosBlue = Color(0xFF007AFF)
+    val iosBlue = if (palette.classic) palette.accent else Color(0xFF007AFF)
     val iosGroupedBg = palette.background
     val iosCardBg = palette.card
     val iosSecondary = palette.secondaryText
     val iosSeparator = palette.separator
     val iosPrimaryText = palette.primaryText
+    val chromeFont = if (palette.classic) FontFamily.Monospace else FontFamily.Default
 
     // Match iOS WalletView sizing:
     // - Total: 36pt bold
@@ -410,8 +629,22 @@ private fun WalletScreen(
     val totalAmountSp = 36.sp
     val suffixSp = 14.sp
 
-    // Very rough progress; iOS uses a stable target height snapshot.
-    val progress = if (targetHeight <= 0L) 0f else (lastScanned.toDouble() / targetHeight.toDouble()).coerceIn(0.0, 1.0).toFloat()
+    // Match iOS progress semantics:
+    // - use the stable target captured at refresh start
+    // - measure completed work from restoreHeight to targetHeight
+    // - clamp near-tip within tolerance to 100%
+    val progress = when {
+        targetHeight <= 0L -> 0f
+        isSynced -> 1f
+        targetHeight <= restoreHeight -> 0f
+        else -> {
+            val clampedScanned = minOf(lastScanned, targetHeight)
+            val workSpan = (targetHeight - restoreHeight).coerceAtLeast(1L)
+            val completed = (clampedScanned - restoreHeight).coerceAtLeast(0L)
+            (completed.toDouble() / workSpan.toDouble()).coerceIn(0.0, 1.0).toFloat()
+        }
+    }
+    val progressPercentText = String.format("%.1f%%", progress * 100f)
 
     // Sort transfers like iOS: pending first, then height desc, then timestamp desc.
     val transfersSorted: List<Transfer> = remember(state.transfers) {
@@ -439,61 +672,39 @@ private fun WalletScreen(
             .padding(16.dp)
     ) {
         // Balance card (iOS-like, theme-aware)
-        Surface(
-            modifier = Modifier.fillMaxWidth(),
-            color = iosCardBg,
-            shape = RoundedCornerShape(16.dp),
-            tonalElevation = 1.dp,
-            shadowElevation = 0.dp,
-        ) {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(16.dp)
-            ) {
-                Text("Total Balance", color = iosSecondary)
-                Spacer(Modifier.height(6.dp))
-                Text(
-                    buildAnnotatedString {
-                        withStyle(
-                            SpanStyle(
-                                fontFamily = FontFamily.Monospace,
-                                fontWeight = FontWeight.Bold,
-                                fontSize = totalAmountSp,
-                                color = iosPrimaryText
-                            )
-                        ) {
-                            append(totalXmr)
-                        }
-                        withStyle(
-                            SpanStyle(
-                                fontFamily = FontFamily.Monospace,
-                                fontWeight = FontWeight.Normal,
-                                fontSize = suffixSp,
-                                color = iosSecondary
-                            )
-                        ) {
-                            append(" XMR")
-                        }
-                    }
-                )
-
-                if (showUnlockedBalance) {
-                    Spacer(Modifier.height(14.dp))
-
-                    Text("Unlocked", color = iosSecondary)
+        SectionCard(palette = palette) {
+            Box(modifier = Modifier.fillMaxWidth()) {
+                if (palette.classic) {
+                    Image(
+                        painter = painterResource(id = R.drawable.ic_launcher_foreground_art),
+                        contentDescription = null,
+                        modifier = Modifier
+                            .size(140.dp)
+                            .align(Alignment.CenterEnd)
+                            .padding(end = 4.dp)
+                            .alpha(0.12f),
+                    )
+                }
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    Text(
+                        if (palette.classic) "NEXAWAL" else "Total Balance",
+                        color = if (palette.classic) iosPrimaryText else iosSecondary,
+                        fontFamily = chromeFont,
+                        fontWeight = if (palette.classic) FontWeight.Bold else FontWeight.Normal,
+                        letterSpacing = if (palette.classic) 2.sp else 0.sp,
+                    )
                     Spacer(Modifier.height(6.dp))
                     Text(
                         buildAnnotatedString {
                             withStyle(
                                 SpanStyle(
                                     fontFamily = FontFamily.Monospace,
-                                    fontWeight = FontWeight.SemiBold,
-                                    fontSize = 20.sp,
-                                    color = iosBlue
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = totalAmountSp,
+                                    color = iosPrimaryText
                                 )
                             ) {
-                                append(unlockedXmr)
+                                append(totalXmr)
                             }
                             withStyle(
                                 SpanStyle(
@@ -507,23 +718,57 @@ private fun WalletScreen(
                             }
                         }
                     )
+
+                    if (showUnlockedBalance) {
+                        Spacer(Modifier.height(14.dp))
+
+                        Text(
+                            if (palette.classic) "UNLOCKED" else "Unlocked",
+                            color = iosSecondary,
+                            fontFamily = chromeFont,
+                        )
+                        Spacer(Modifier.height(6.dp))
+                        Text(
+                            buildAnnotatedString {
+                                withStyle(
+                                    SpanStyle(
+                                        fontFamily = FontFamily.Monospace,
+                                        fontWeight = FontWeight.SemiBold,
+                                        fontSize = 20.sp,
+                                        color = iosBlue
+                                    )
+                                ) {
+                                    append(unlockedXmr)
+                                }
+                                withStyle(
+                                    SpanStyle(
+                                        fontFamily = FontFamily.Monospace,
+                                        fontWeight = FontWeight.Normal,
+                                        fontSize = suffixSp,
+                                        color = iosSecondary
+                                    )
+                                ) {
+                                    append(" XMR")
+                                }
+                            }
+                        )
+                    }
                 }
             }
         }
 
         Spacer(Modifier.height(16.dp))
 
-        Spacer(Modifier.height(12.dp))
-
         Row(modifier = Modifier.fillMaxWidth()) {
             PrimaryActionButton(
-                text = "Send",
+                text = if (palette.classic) "SEND" else "Send",
                 onClick = onOpenSend,
+                palette = palette,
                 modifier = Modifier.weight(1f)
             )
             Spacer(Modifier.width(12.dp))
             SecondaryActionButton(
-                text = "Receive",
+                text = if (palette.classic) "RECEIVE" else "Receive",
                 onClick = onOpenReceive,
                 palette = palette,
                 modifier = Modifier.weight(1f)
@@ -541,24 +786,19 @@ private fun WalletScreen(
         Spacer(Modifier.height(16.dp))
 
         // Sync Status (iOS-like, theme-aware)
-        SectionLabel("Status", palette)
+        SectionLabel(if (palette.classic) "STATUS" else "Status", palette)
         Spacer(Modifier.height(8.dp))
 
-        Surface(
-            modifier = Modifier.fillMaxWidth(),
-            color = iosCardBg,
-            shape = RoundedCornerShape(14.dp),
-            tonalElevation = 1.dp,
-            shadowElevation = 0.dp,
-        ) {
-            Column(modifier = Modifier.padding(12.dp)) {
-                val syncHeadline = when {
+        SectionCard(palette = palette) {
+            Column {
+                val syncHeadlineRaw = when {
                     isSynced -> "Wallet synced"
                     targetHeight == 0L -> "Connecting to node"
                     state.refreshInProgress && lastScanned == restoreHeight -> "Scanning blockchain"
                     state.refreshInProgress && blocksPerSecSmoothed <= 0.0 -> "Syncing wallet"
                     else -> "Syncing wallet"
                 }
+                val syncHeadline = if (palette.classic) syncHeadlineRaw.uppercase() else syncHeadlineRaw
                 val syncDetail = when {
                     isSynced -> "Scanned to block ${formatGrouped(lastScanned)}"
                     targetHeight == 0L -> "Waiting for network height"
@@ -566,21 +806,36 @@ private fun WalletScreen(
                     else -> "${formatGrouped(remainingBlocks)} blocks remaining"
                 }
 
-                Text(syncHeadline, color = iosPrimaryText, fontWeight = FontWeight.SemiBold)
+                Row {
+                    Icon(
+                        imageVector = if (isSynced) Icons.Filled.CheckCircle else Icons.Filled.Sync,
+                        contentDescription = syncHeadline,
+                        tint = if (isSynced) palette.success else palette.accent
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        syncHeadline,
+                        color = iosPrimaryText,
+                        fontWeight = FontWeight.SemiBold,
+                        fontSize = 18.sp,
+                        fontFamily = chromeFont,
+                    )
+                }
                 Spacer(Modifier.height(4.dp))
                 Text(syncDetail, color = iosSecondary)
                 Spacer(Modifier.height(10.dp))
 
-                KeyValueRow("Node", state.nodeUrl ?: walletManager.defaultNodeUrl(), labelColor = iosSecondary, valueColor = iosPrimaryText)
-                KeyValueRow("Scanned", formatGrouped(lastScanned), labelColor = iosSecondary, valueColor = iosPrimaryText)
+                KeyValueRow(if (palette.classic) "NODE" else "Node", state.nodeUrl ?: walletManager.defaultNodeUrl(), labelColor = iosSecondary, valueColor = iosPrimaryText)
+                KeyValueRow(if (palette.classic) "SCANNED" else "Scanned", formatGrouped(lastScanned), labelColor = iosSecondary, valueColor = iosPrimaryText)
                 if (targetHeight > 0L) {
-                    KeyValueRow("Network Height", formatGrouped(targetHeight), labelColor = iosSecondary, valueColor = iosPrimaryText)
+                    KeyValueRow(if (palette.classic) "NETWORK HEIGHT" else "Network Height", formatGrouped(targetHeight), labelColor = iosSecondary, valueColor = iosPrimaryText)
+                    KeyValueRow(if (palette.classic) "PROGRESS" else "Progress", progressPercentText, labelColor = iosSecondary, valueColor = iosPrimaryText)
                 }
                 if (!isSynced) {
-                    KeyValueRow("Remaining", "${formatGrouped(remainingBlocks)} blocks", labelColor = iosSecondary, valueColor = iosPrimaryText)
+                    KeyValueRow(if (palette.classic) "REMAINING" else "Remaining", "${formatGrouped(remainingBlocks)} blocks", labelColor = iosSecondary, valueColor = iosPrimaryText)
                 }
                 if (state.refreshInProgress && blocksPerSecSmoothed > 0.0) {
-                    KeyValueRow("Throughput", String.format("%.1f blk/s", blocksPerSecSmoothed), labelColor = iosSecondary, valueColor = iosPrimaryText)
+                    KeyValueRow(if (palette.classic) "THROUGHPUT" else "Throughput", String.format("%.1f blk/s", blocksPerSecSmoothed), labelColor = iosSecondary, valueColor = iosPrimaryText)
                 }
 
                 Spacer(Modifier.height(10.dp))
@@ -595,30 +850,33 @@ private fun WalletScreen(
         }
         Spacer(Modifier.height(16.dp))
 
-        Text("Recent Transactions", color = iosPrimaryText, fontWeight = FontWeight.SemiBold, fontSize = 20.sp)
+        Text(
+            if (palette.classic) "RECENT TRANSACTIONS" else "Recent Transactions",
+            color = iosPrimaryText,
+            fontWeight = FontWeight.SemiBold,
+            fontSize = 20.sp,
+            fontFamily = chromeFont,
+        )
         Spacer(Modifier.height(8.dp))
 
-        Surface(
-            modifier = Modifier.fillMaxWidth(),
-            color = iosCardBg,
-            shape = RoundedCornerShape(14.dp),
-            tonalElevation = 1.dp,
-            shadowElevation = 0.dp,
-        ) {
-            Column(modifier = Modifier.padding(12.dp)) {
+        SectionCard(palette = palette) {
+            Column {
                 if (transfersSorted.isEmpty()) {
                     Text("No transactions yet.", color = iosSecondary)
                 } else {
                     transfersSorted.forEachIndexed { index, t ->
                         TransferRow(
                             t = t,
+                            palette = palette,
                             onClick = {
                                 selectedTransfer = t
                                 showTransferDetails = true
                             }
                         )
                         if (index != transfersSorted.lastIndex) {
-                            Spacer(Modifier.height(4.dp))
+                            Spacer(Modifier.height(2.dp))
+                            androidx.compose.material3.HorizontalDivider(color = palette.separator)
+                            Spacer(Modifier.height(2.dp))
                         }
                     }
                 }
@@ -650,12 +908,14 @@ private fun WalletScreen(
             }
         } else {
             PrimaryActionButton(
-                text = "Refresh Wallet",
+                text = if (palette.classic) "REFRESH WALLET" else "Refresh Wallet",
                 onClick = {
                     errorText = null
                     scope.launch {
                         try {
-                            walletManager.refreshWallet()
+                            withContext(Dispatchers.IO) {
+                                walletManager.refreshWallet()
+                            }
                             walletManager.refreshWalletDataSnapshots()
                             statusText = "Refreshed"
                         } catch (t: Throwable) {
@@ -663,6 +923,7 @@ private fun WalletScreen(
                         }
                     }
                 },
+                palette = palette,
                 modifier = Modifier.fillMaxWidth()
             )
 
@@ -718,7 +979,9 @@ private fun KeyValueRow(
         Text(
             value,
             fontFamily = FontFamily.Monospace,
-            color = valueColor
+            color = valueColor,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
         )
     }
 }
@@ -726,22 +989,27 @@ private fun KeyValueRow(
 @Composable
 private fun TransferRow(
     t: Transfer,
+    palette: NexaPalette,
     onClick: () -> Unit,
 ) {
-    val direction = t.directionLabel()
+    val direction = if (palette.classic) t.directionLabel().uppercase() else t.directionLabel()
     val amountColor = when (t.direction.lowercase()) {
-        "in" -> Color(0xFF34C759) // green
-        "out" -> Color(0xFFFF3B30) // red
-        else -> Color.Unspecified
+        "in" -> palette.success
+        "out" -> palette.danger
+        else -> palette.primaryText
     }
 
     val relTime = TimeFormat.relative(t.timestamp)
-    val statusText = if (t.pending) "Pending" else "${formatGrouped(t.confirmations)} conf"
+    val statusText = when {
+        t.pending && palette.classic -> "PENDING"
+        t.pending -> "Pending"
+        else -> "${formatGrouped(t.confirmations)} conf"
+    }
     val shortTxid = if (t.txid.length > 18) "${t.txid.take(10)}…${t.txid.takeLast(6)}" else t.txid
-    val directionGlyph = when (t.direction.lowercase()) {
-        "in" -> "↓"
-        "out" -> "↑"
-        else -> "•"
+    val directionIcon = when (t.direction.lowercase()) {
+        "in" -> Icons.Filled.ArrowDownward
+        "out" -> Icons.Filled.ArrowUpward
+        else -> Icons.Filled.Sync
     }
     val amountText = XmrFormat.formatPiconeroAsDisplayXmr(t.amount)
 
@@ -752,11 +1020,10 @@ private fun TransferRow(
             .padding(vertical = 12.dp)
     ) {
         Row(modifier = Modifier.fillMaxWidth()) {
-            Text(
-                directionGlyph,
-                color = amountColor,
-                fontSize = 20.sp,
-                fontWeight = FontWeight.Bold,
+            Icon(
+                imageVector = directionIcon,
+                contentDescription = direction,
+                tint = amountColor,
                 modifier = Modifier.padding(top = 2.dp)
             )
 
@@ -765,18 +1032,19 @@ private fun TransferRow(
             Column(modifier = Modifier.weight(1f)) {
                 Text(
                     direction,
-                    color = Color.Unspecified,
-                    fontWeight = FontWeight.SemiBold
+                    color = palette.primaryText,
+                    fontWeight = FontWeight.SemiBold,
+                    fontFamily = if (palette.classic) FontFamily.Monospace else FontFamily.Default,
                 )
 
                 Spacer(Modifier.height(4.dp))
 
                 Row {
                     relTime?.let {
-                        Text(it, color = Color.Gray)
+                        Text(it, color = palette.secondaryText)
                         Spacer(Modifier.width(8.dp))
                     }
-                    Text(statusText, color = Color.Gray)
+                    Text(statusText, color = palette.secondaryText)
                 }
 
                 Spacer(Modifier.height(4.dp))
@@ -786,7 +1054,7 @@ private fun TransferRow(
                     fontFamily = FontFamily.Monospace,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
-                    color = Color.Gray,
+                    color = palette.secondaryText,
                     fontSize = 12.sp
                 )
             }
@@ -797,13 +1065,13 @@ private fun TransferRow(
                     fontFamily = FontFamily.Monospace,
                     color = amountColor,
                     fontWeight = FontWeight.SemiBold,
-                    fontSize = 16.sp
+                    fontSize = 17.sp
                 )
                 t.fee?.let {
                     Text(
                         "Fee ${XmrFormat.formatPiconeroAsDisplayXmr(it)}",
                         fontFamily = FontFamily.Monospace,
-                        color = Color.Gray,
+                        color = palette.secondaryText,
                         fontSize = 12.sp
                     )
                 }
@@ -839,17 +1107,30 @@ private fun TransferDetailsDialog(
                     Text("TXID:\n${t.txid}", fontFamily = FontFamily.Monospace)
                 }
                 Spacer(Modifier.height(8.dp))
-                Button(onClick = {
-                    scope.launch {
-                        ClipboardCompat.setText(clipboard, t.txid)
-                    }
-                }) {
+                // themed below via palette from parent if available
+                Button(
+                    onClick = {
+                        scope.launch {
+                            ClipboardCompat.setText(clipboard, t.txid)
+                        }
+                    },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = Color(0xFF39FF14),
+                        contentColor = Color(0xFF001A12),
+                    )
+                ) {
                     Text("Copy TXID")
                 }
             }
         },
         confirmButton = {
-            Button(onClick = onDismiss) { Text("Close") }
+            Button(
+                onClick = onDismiss,
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = Color(0xFF121612),
+                    contentColor = Color(0xFF39FF14),
+                )
+            ) { Text("Close") }
         }
     )
 }
@@ -858,11 +1139,10 @@ private fun TransferDetailsDialog(
  * Receive screen with persisted receive subaddresses, QR, copy, and share.
  */
 @Composable
-private fun ReceiveScreen(walletManager: WalletManager) {
+private fun ReceiveScreen(walletManager: WalletManager, palette: NexaPalette) {
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     val clipboard = ClipboardCompat.current()
-    val palette = rememberNexaPalette()
 
     var receiveEntries by remember { mutableStateOf<List<ReceiveSubaddressEntry>>(emptyList()) }
     var selectedSubaddressIndex by remember { mutableStateOf(0) }
@@ -904,20 +1184,32 @@ private fun ReceiveScreen(walletManager: WalletManager) {
         ""
     }
 
-    val qrBitmap = remember(paymentUri) {
+    val qrBitmap = remember(paymentUri, palette.classic, palette.accent, palette.background) {
         runCatching {
-            if (paymentUri.isNotEmpty()) MoneroQr.qrBitmap(paymentUri, sizePx = 640) else null
+            if (paymentUri.isEmpty()) {
+                null
+            } else if (palette.classic) {
+                MoneroQr.qrBitmap(
+                    paymentUri,
+                    sizePx = 640,
+                    foreground = palette.accent.toArgb(),
+                    background = palette.background.toArgb(),
+                )
+            } else {
+                MoneroQr.qrBitmap(paymentUri, sizePx = 640)
+            }
         }.getOrNull()
     }
 
     Column(
         modifier = Modifier
             .fillMaxSize()
+            .background(palette.background)
             .verticalScroll(rememberScrollState())
             .padding(16.dp)
     ) {
         ScreenHeading(
-            title = "Receive",
+            title = if (palette.classic) "RECEIVE" else "Receive",
             subtitle = "Show the QR code, copy the address, or create a fresh receive address for better privacy.",
             palette = palette
         )
@@ -926,10 +1218,24 @@ private fun ReceiveScreen(walletManager: WalletManager) {
         if (qrBitmap != null) {
             Image(
                 bitmap = qrBitmap.asImageBitmap(),
-                contentDescription = "Monero receive QR"
+                contentDescription = "Monero receive QR",
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .aspectRatio(1f)
+                    .background(
+                        if (palette.classic) palette.background else Color.White,
+                        RoundedCornerShape(if (palette.classic) 4.dp else 12.dp),
+                    )
+                    .then(
+                        if (palette.classic) {
+                            Modifier.border(1.dp, palette.border, RoundedCornerShape(4.dp))
+                        } else {
+                            Modifier
+                        }
+                    )
             )
         } else {
-            Text("QR unavailable", color = Color.Gray)
+            Text("QR unavailable", color = palette.secondaryText)
         }
 
         Spacer(Modifier.height(12.dp))
@@ -937,7 +1243,11 @@ private fun ReceiveScreen(walletManager: WalletManager) {
         SectionLabel("Address", palette)
         Spacer(Modifier.height(6.dp))
         SelectionContainer {
-            Text(receiveAddress.ifBlank { "(unavailable)" }, fontFamily = FontFamily.Monospace)
+            Text(
+                receiveAddress.ifBlank { "(unavailable)" },
+                fontFamily = FontFamily.Monospace,
+                color = palette.primaryText,
+            )
         }
 
         if (paymentUri.isNotBlank() && paymentUri.startsWith("monero:")) {
@@ -957,6 +1267,7 @@ private fun ReceiveScreen(walletManager: WalletManager) {
 
         PrimaryActionButton(
             text = "Copy",
+            palette = palette,
             onClick = {
                 scope.launch {
                     ClipboardCompat.setText(clipboard, if (paymentUri.isNotBlank()) paymentUri else receiveAddress)
@@ -1018,7 +1329,8 @@ private fun ReceiveScreen(walletManager: WalletManager) {
                 receiveEntries.firstOrNull { it.subaddressIndex == selectedSubaddressIndex }?.let {
                     val label = it.label.trim()
                     if (label.isEmpty()) "Selected: Subaddress ${it.subaddressIndex}" else "Selected: $label"
-                } ?: "Selected: Subaddress $selectedSubaddressIndex"
+                } ?: "Selected: Subaddress $selectedSubaddressIndex",
+                color = palette.primaryText,
             )
 
             Spacer(Modifier.height(8.dp))
@@ -1039,6 +1351,7 @@ private fun ReceiveScreen(walletManager: WalletManager) {
             PrimaryActionButton(
                 text = "New receive address",
                 onClick = { showCreatePrompt = true },
+                palette = palette,
                 modifier = Modifier.fillMaxWidth()
             )
         }
@@ -1053,7 +1366,8 @@ private fun ReceiveScreen(walletManager: WalletManager) {
             onValueChange = { amountXmr = it },
             singleLine = true,
             modifier = Modifier.fillMaxWidth(),
-            placeholder = { Text("0.0 XMR") }
+            placeholder = { Text("0.0 XMR", color = palette.secondaryText) },
+            colors = nexaFieldColors(palette),
         )
 
         Spacer(Modifier.height(8.dp))
@@ -1063,12 +1377,13 @@ private fun ReceiveScreen(walletManager: WalletManager) {
             onValueChange = { description = it },
             singleLine = true,
             modifier = Modifier.fillMaxWidth(),
-            placeholder = { Text("What is this for?") }
+            placeholder = { Text("What is this for?", color = palette.secondaryText) },
+            colors = nexaFieldColors(palette),
         )
 
         statusText?.let {
             Spacer(Modifier.height(12.dp))
-            Text(it)
+            Text(it, color = palette.primaryText)
         }
     }
 
@@ -1082,34 +1397,39 @@ private fun ReceiveScreen(walletManager: WalletManager) {
                     onValueChange = { newLabel = it },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
-                    placeholder = { Text("Optional label") }
+                    placeholder = { Text("Optional label", color = palette.secondaryText) },
+                    colors = nexaFieldColors(palette),
                 )
             },
             confirmButton = {
-                Button(onClick = {
-                    val label = newLabel.trim()
-                    newLabel = ""
-                    showCreatePrompt = false
-                    scope.launch {
-                        runCatching {
-                            val created = walletManager.createReceiveSubaddress(label)
-                            refreshAddressBook()
-                            selectedSubaddressIndex = created.subaddressIndex
-                        }.onFailure {
-                            statusText = it.message ?: it.javaClass.simpleName
+                PrimaryActionButton(
+                    text = "Create",
+                    onClick = {
+                        val label = newLabel.trim()
+                        newLabel = ""
+                        showCreatePrompt = false
+                        scope.launch {
+                            runCatching {
+                                val created = walletManager.createReceiveSubaddress(label)
+                                refreshAddressBook()
+                                selectedSubaddressIndex = created.subaddressIndex
+                            }.onFailure {
+                                statusText = it.message ?: it.javaClass.simpleName
+                            }
                         }
-                    }
-                }) {
-                    Text("Create")
-                }
+                    },
+                    palette = palette,
+                )
             },
             dismissButton = {
-                Button(onClick = {
-                    newLabel = ""
-                    showCreatePrompt = false
-                }) {
-                    Text("Cancel")
-                }
+                SecondaryActionButton(
+                    text = "Cancel",
+                    onClick = {
+                        newLabel = ""
+                        showCreatePrompt = false
+                    },
+                    palette = palette,
+                )
             }
         )
     }
@@ -1119,11 +1439,10 @@ private fun ReceiveScreen(walletManager: WalletManager) {
  * Send screen: fee preview, send, and send max (sweep) using WalletManager.
  */
 @Composable
-private fun SendScreen(walletManager: WalletManager) {
+private fun SendScreen(walletManager: WalletManager, palette: NexaPalette) {
     val scope = rememberCoroutineScope()
     val state by walletManager.state.collectAsState()
     val context = LocalContext.current
-    val palette = rememberNexaPalette()
 
     var toAddress by remember { mutableStateOf("") }
     var amountXmrText by remember { mutableStateOf("") }
@@ -1139,10 +1458,27 @@ private fun SendScreen(walletManager: WalletManager) {
     var showExactConfirmation by remember { mutableStateOf(false) }
     var showMaxConfirmation by remember { mutableStateOf(false) }
     var showScanner by remember { mutableStateOf(false) }
+    var sendFromSubaddressEnabled by remember { mutableStateOf(false) }
+    var fromSubaddressMinor by remember { mutableStateOf(0) }
+    var receiveEntries by remember { mutableStateOf<List<ReceiveSubaddressEntry>>(emptyList()) }
+    var subaddressUnlockedOverride by remember { mutableStateOf<Long?>(null) }
 
-    val unlockedPiconero = state.balance?.unlockedPiconero ?: 0L
+    val unlockedPiconero = if (sendFromSubaddressEnabled) {
+        subaddressUnlockedOverride ?: 0L
+    } else {
+        state.balance?.unlockedPiconero ?: 0L
+    }
     val unlockedXmr = XmrFormat.formatPiconeroAsDisplayXmr(unlockedPiconero)
     val hasWallet = !state.walletId.isNullOrBlank()
+    val configSnapshot = remember(context, state.nodeUrl) { MoneroConfig.snapshot(context) }
+    val broadcastNodeUrl = remember(context, state.nodeUrl, configSnapshot) {
+        MoneroConfig.broadcastNodeUrl(context, walletManager.currentNodeUrl())
+    }
+    val selectedSubaddressTitle = receiveEntries.firstOrNull { it.subaddressIndex == fromSubaddressMinor }
+        ?.let { entry ->
+            entry.label.trim().ifEmpty { "Subaddress ${entry.subaddressIndex}" }
+        }
+        ?: "Subaddress $fromSubaddressMinor"
 
     fun canPreviewFee(): Boolean = hasWallet && toAddress.trim().isNotEmpty() && amountXmrText.trim().isNotEmpty() && !isEstimating && !isSending
     fun canSendExact(): Boolean = canPreviewFee() && estimatedFee != null
@@ -1154,9 +1490,37 @@ private fun SendScreen(walletManager: WalletManager) {
         return XmrFormat.formatPiconeroAsXmr(amount + fee.fee)
     }
 
-    Column(modifier = Modifier.padding(16.dp)) {
+    LaunchedEffect(hasWallet) {
+        if (!hasWallet) return@LaunchedEffect
+        runCatching { walletManager.loadReceiveSubaddressBook() }
+            .onSuccess { book ->
+                receiveEntries = book.entries
+                if (book.entries.none { it.subaddressIndex == fromSubaddressMinor }) {
+                    fromSubaddressMinor = 0
+                }
+            }
+            .onFailure { errorText = it.message ?: it.javaClass.simpleName }
+    }
+
+    LaunchedEffect(sendFromSubaddressEnabled, fromSubaddressMinor, hasWallet) {
+        if (!hasWallet || !sendFromSubaddressEnabled) {
+            subaddressUnlockedOverride = null
+            return@LaunchedEffect
+        }
+
+        runCatching { walletManager.getBalance(fromSubaddressMinor) }
+            .onSuccess { bal ->
+                subaddressUnlockedOverride = bal.unlockedPiconero
+            }
+            .onFailure {
+                subaddressUnlockedOverride = null
+                errorText = it.message ?: it.javaClass.simpleName
+            }
+    }
+
+    Column(modifier = Modifier.fillMaxSize().background(palette.background).verticalScroll(rememberScrollState()).padding(16.dp)) {
         ScreenHeading(
-            title = "Send",
+            title = if (palette.classic) "SEND" else "Send",
             subtitle = "Enter the recipient and amount, preview the fee, then confirm the transaction.",
             palette = palette
         )
@@ -1167,7 +1531,7 @@ private fun SendScreen(walletManager: WalletManager) {
             Spacer(Modifier.height(12.dp))
         }
 
-        Text("To address")
+        Text("To address", color = palette.primaryText)
         OutlinedTextField(
             value = toAddress,
             onValueChange = {
@@ -1183,17 +1547,19 @@ private fun SendScreen(walletManager: WalletManager) {
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(bottom = 8.dp),
+            colors = nexaFieldColors(palette),
             trailingIcon = {
                 androidx.compose.material3.IconButton(onClick = { showScanner = true }) {
                     Icon(
                         imageVector = Icons.Default.QrCodeScanner,
-                        contentDescription = "Scan QR code"
+                        contentDescription = "Scan QR code",
+                        tint = palette.accent,
                     )
                 }
             }
         )
 
-        Text("Amount (XMR)")
+        Text("Amount (XMR)", color = palette.primaryText)
         OutlinedTextField(
             value = amountXmrText,
             onValueChange = {
@@ -1207,12 +1573,13 @@ private fun SendScreen(walletManager: WalletManager) {
             singleLine = true,
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(bottom = 8.dp)
+                .padding(bottom = 8.dp),
+            colors = nexaFieldColors(palette),
         )
 
         val mergedError = errorText ?: state.lastError
         if (mergedError != null) {
-            Text(mergedError, color = Color(0xFFFF3B30))
+            Text(mergedError, color = palette.danger)
             Spacer(Modifier.height(12.dp))
         }
 
@@ -1224,7 +1591,7 @@ private fun SendScreen(walletManager: WalletManager) {
         estimatedFee?.let { fee ->
             SectionLabel("Confirm", palette)
             Spacer(Modifier.height(6.dp))
-            Text("Estimated fee: ${fee.feeXmr} XMR")
+            Text("Estimated fee: ${fee.feeXmr} XMR", color = palette.primaryText)
             totalWithFeeText()?.let { total ->
                 Text("Total (amount + fee): $total XMR", color = palette.secondaryText)
             }
@@ -1241,7 +1608,7 @@ private fun SendScreen(walletManager: WalletManager) {
         sweepPreview?.let { preview ->
             SectionLabel("Confirm send max", palette)
             Spacer(Modifier.height(6.dp))
-            Text("Send max amount: ${preview.amountXmr} XMR")
+            Text("Send max amount: ${preview.amountXmr} XMR", color = palette.primaryText)
             Text("Estimated fee: ${preview.feeXmr} XMR", color = palette.secondaryText)
             Spacer(Modifier.height(12.dp))
         }
@@ -1276,15 +1643,31 @@ private fun SendScreen(walletManager: WalletManager) {
                     isEstimating = true
                     try {
                         val amountPiconero = parseXmrToPiconero(amountXmrText)
-                        estimatedFee = walletManager.previewFee(
-                            destinations = listOf(
-                                SendJson.Destination(
-                                    address = toAddress.trim(),
-                                    amount = amountPiconero
+                        estimatedFee = if (sendFromSubaddressEnabled) {
+                            walletManager.previewFee(
+                                fromSubaddressMinor = fromSubaddressMinor,
+                                destinations = listOf(
+                                    SendJson.Destination(
+                                        address = toAddress.trim(),
+                                        amount = amountPiconero
+                                    )
                                 )
                             )
-                        )
-                        infoText = "Fee estimated successfully."
+                        } else {
+                            walletManager.previewFee(
+                                destinations = listOf(
+                                    SendJson.Destination(
+                                        address = toAddress.trim(),
+                                        amount = amountPiconero
+                                    )
+                                )
+                            )
+                        }
+                        infoText = if (sendFromSubaddressEnabled) {
+                            "Fee estimated using $selectedSubaddressTitle."
+                        } else {
+                            "Fee estimated successfully."
+                        }
                     } catch (t: Throwable) {
                         errorText = t.message ?: t.javaClass.simpleName
                     } finally {
@@ -1305,6 +1688,7 @@ private fun SendScreen(walletManager: WalletManager) {
                 showExactConfirmation = true
             },
             enabled = canSendExact(),
+            palette = palette,
             modifier = Modifier.fillMaxWidth()
         )
 
@@ -1321,8 +1705,19 @@ private fun SendScreen(walletManager: WalletManager) {
                 scope.launch {
                     isPreviewingMax = true
                     try {
-                        sweepPreview = walletManager.previewSweep(toAddress = toAddress.trim())
-                        infoText = "Maximum sendable amount estimated."
+                        sweepPreview = if (sendFromSubaddressEnabled) {
+                            walletManager.previewSweep(
+                                fromSubaddressMinor = fromSubaddressMinor,
+                                toAddress = toAddress.trim()
+                            )
+                        } else {
+                            walletManager.previewSweep(toAddress = toAddress.trim())
+                        }
+                        infoText = if (sendFromSubaddressEnabled) {
+                            "Maximum sendable amount estimated using $selectedSubaddressTitle."
+                        } else {
+                            "Maximum sendable amount estimated."
+                        }
                     } catch (t: Throwable) {
                         errorText = t.message ?: t.javaClass.simpleName
                     } finally {
@@ -1343,6 +1738,7 @@ private fun SendScreen(walletManager: WalletManager) {
                 showMaxConfirmation = true
             },
             enabled = canSendMax(),
+            palette = palette,
             modifier = Modifier.fillMaxWidth()
         )
 
@@ -1350,7 +1746,83 @@ private fun SendScreen(walletManager: WalletManager) {
 
         SectionLabel("Advanced", palette)
         Spacer(Modifier.height(8.dp))
-        Text("Node policy: ${walletManager.currentNodeUrl()}", color = palette.secondaryText)
+        Row(modifier = Modifier.fillMaxWidth()) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text("Send from specific subaddress", color = palette.primaryText, fontWeight = FontWeight.SemiBold)
+                Spacer(Modifier.height(4.dp))
+                Text("Constrain inputs to one receive subaddress for tighter spend control.", color = palette.secondaryText)
+            }
+            Switch(
+                checked = sendFromSubaddressEnabled,
+                onCheckedChange = {
+                    sendFromSubaddressEnabled = it
+                    estimatedFee = null
+                    sweepPreview = null
+                    sendResult = null
+                    sweepResult = null
+                    infoText = null
+                    errorText = null
+                },
+                colors = nexaSwitchColors(palette),
+            )
+        }
+        if (sendFromSubaddressEnabled) {
+            Spacer(Modifier.height(12.dp))
+            Text("Selected subaddress", color = palette.primaryText)
+            Spacer(Modifier.height(6.dp))
+            if (receiveEntries.isEmpty()) {
+                Text("Loading subaddresses…", color = palette.secondaryText)
+            } else {
+                receiveEntries.forEach { entry ->
+                    val title = entry.label.trim().ifEmpty { "Subaddress ${entry.subaddressIndex}" }
+                    SecondaryActionButton(
+                        text = if (entry.subaddressIndex == fromSubaddressMinor) "Selected: $title" else title,
+                        onClick = {
+                            fromSubaddressMinor = entry.subaddressIndex
+                            estimatedFee = null
+                            sweepPreview = null
+                            sendResult = null
+                            sweepResult = null
+                            infoText = null
+                            errorText = null
+                        },
+                        palette = palette,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Spacer(Modifier.height(4.dp))
+                }
+                Spacer(Modifier.height(8.dp))
+                Text("This constrains inputs to account 0, subaddress $fromSubaddressMinor.", color = palette.secondaryText)
+            }
+        }
+
+        Spacer(Modifier.height(12.dp))
+        KeyValueRow(
+            label = "Policy",
+            value = when (configSnapshot.networkPolicy) {
+                MoneroConfig.NetworkPolicy.CLEARNET -> "Clearnet"
+                MoneroConfig.NetworkPolicy.I2P -> "I2P only"
+                MoneroConfig.NetworkPolicy.HYBRID -> "Hybrid"
+            },
+            labelColor = palette.secondaryText,
+            valueColor = palette.primaryText
+        )
+        Spacer(Modifier.height(6.dp))
+        KeyValueRow(
+            label = "Broadcast",
+            value = broadcastNodeUrl,
+            labelColor = palette.secondaryText,
+            valueColor = palette.primaryText
+        )
+        if (!configSnapshot.i2pHttpProxyAddress.isNullOrBlank()) {
+            Spacer(Modifier.height(6.dp))
+            KeyValueRow(
+                label = "I2P Proxy",
+                value = configSnapshot.i2pHttpProxyAddress,
+                labelColor = palette.secondaryText,
+                valueColor = palette.primaryText
+            )
+        }
     }
 
     if (showExactConfirmation) {
@@ -1365,7 +1837,7 @@ private fun SendScreen(walletManager: WalletManager) {
                     Spacer(Modifier.height(8.dp))
                     amountPiconero?.let {
                         Text("Amount", color = palette.secondaryText)
-                        Text("${XmrFormat.formatPiconeroAsDisplayXmr(it)} XMR", fontFamily = FontFamily.Monospace)
+                        Text("${XmrFormat.formatPiconeroAsXmr(it)} XMR", fontFamily = FontFamily.Monospace)
                     }
                     estimatedFee?.let {
                         Spacer(Modifier.height(8.dp))
@@ -1382,6 +1854,7 @@ private fun SendScreen(walletManager: WalletManager) {
             confirmButton = {
                 PrimaryActionButton(
                     text = "Confirm Send",
+                    palette = palette,
                     onClick = {
                         showExactConfirmation = false
                         errorText = null
@@ -1403,11 +1876,23 @@ private fun SendScreen(walletManager: WalletManager) {
                                     )
                                 }
 
-                                sendResult = walletManager.send(
-                                    toAddress = toAddress.trim(),
-                                    amountPiconero = amountPiconeroNow
-                                )
-                                infoText = "Transaction broadcast."
+                                sendResult = if (sendFromSubaddressEnabled) {
+                                    walletManager.send(
+                                        fromSubaddressMinor = fromSubaddressMinor,
+                                        toAddress = toAddress.trim(),
+                                        amountPiconero = amountPiconeroNow
+                                    )
+                                } else {
+                                    walletManager.send(
+                                        toAddress = toAddress.trim(),
+                                        amountPiconero = amountPiconeroNow
+                                    )
+                                }
+                                infoText = if (sendFromSubaddressEnabled) {
+                                    "Transaction broadcast from $selectedSubaddressTitle."
+                                } else {
+                                    "Transaction broadcast."
+                                }
                                 walletManager.refreshWalletDataSnapshots()
                             } catch (t: Throwable) {
                                 errorText = t.message ?: t.javaClass.simpleName
@@ -1454,6 +1939,7 @@ private fun SendScreen(walletManager: WalletManager) {
             confirmButton = {
                 PrimaryActionButton(
                     text = "Confirm Send Max",
+                    palette = palette,
                     onClick = {
                         showMaxConfirmation = false
                         errorText = null
@@ -1472,8 +1958,19 @@ private fun SendScreen(walletManager: WalletManager) {
                                     )
                                 }
 
-                                sweepResult = walletManager.sweep(toAddress = toAddress.trim())
-                                infoText = "Maximum spendable balance broadcast."
+                                sweepResult = if (sendFromSubaddressEnabled) {
+                                    walletManager.sweep(
+                                        fromSubaddressMinor = fromSubaddressMinor,
+                                        toAddress = toAddress.trim()
+                                    )
+                                } else {
+                                    walletManager.sweep(toAddress = toAddress.trim())
+                                }
+                                infoText = if (sendFromSubaddressEnabled) {
+                                    "Maximum spendable balance broadcast from $selectedSubaddressTitle."
+                                } else {
+                                    "Maximum spendable balance broadcast."
+                                }
                                 walletManager.refreshWalletDataSnapshots()
                             } catch (t: Throwable) {
                                 errorText = t.message ?: t.javaClass.simpleName
@@ -1590,16 +2087,21 @@ private fun SendScreen(walletManager: WalletManager) {
  * Settings screen with editable node URL.
  */
 @Composable
-private fun SettingsScreen(walletManager: WalletManager) {
+private fun SettingsScreen(
+    walletManager: WalletManager,
+    classicUI: Boolean,
+    onClassicUIChange: (Boolean) -> Unit,
+) {
     val scope = rememberCoroutineScope()
     val state by walletManager.state.collectAsState()
     val context = LocalContext.current
-    val dark = isSystemInDarkTheme()
+    val palette = rememberNexaPalette(classicUI)
 
-    val groupedBg = if (dark) Color(0xFF000000) else Color(0xFFF2F2F7)
-    val cardBg = if (dark) Color(0xFF1C1C1E) else Color(0xFFFFFFFF)
-    val secondaryText = if (dark) Color(0xFF8E8E93) else Color(0xFF6D6D72)
-    val primaryText = if (dark) Color(0xFFFFFFFF) else Color(0xFF000000)
+    val groupedBg = palette.background
+    val cardBg = palette.card
+    val secondaryText = palette.secondaryText
+    val primaryText = palette.primaryText
+    val sectionShape = RoundedCornerShape(if (palette.classic) 4.dp else 16.dp)
 
     var nodeUrlInput by remember {
         mutableStateOf(state.nodeUrl ?: walletManager.defaultNodeUrl())
@@ -1611,6 +2113,14 @@ private fun SettingsScreen(walletManager: WalletManager) {
     }
     var accountGapInput by remember {
         mutableStateOf(MoneroConfig.accountGap(context).toString())
+    }
+    var restoreHeightInput by remember {
+        mutableStateOf(
+            state.syncStatus?.restoreHeight
+                ?.takeIf { it > 0L }
+                ?.toString()
+                ?: ""
+        )
     }
 
     // Validation state (keep messages close to the inputs).
@@ -1630,20 +2140,61 @@ private fun SettingsScreen(walletManager: WalletManager) {
             .verticalScroll(rememberScrollState())
             .padding(16.dp)
     ) {
-        Text("Settings", fontSize = 28.sp, fontWeight = FontWeight.Bold, color = primaryText)
+        Text(
+            if (palette.classic) "SETTINGS" else "Settings",
+            fontSize = 28.sp,
+            fontWeight = FontWeight.Bold,
+            color = primaryText,
+            fontFamily = if (palette.classic) FontFamily.Monospace else FontFamily.Default,
+        )
         Spacer(Modifier.height(6.dp))
         Text("Manage node access, device security, and recovery behavior.", color = secondaryText)
 
         Spacer(Modifier.height(20.dp))
 
-        Text("Network", color = secondaryText)
+        Text(if (palette.classic) "APPEARANCE" else "Appearance", color = secondaryText)
         Spacer(Modifier.height(8.dp))
         Surface(
             modifier = Modifier.fillMaxWidth(),
             color = cardBg,
-            shape = RoundedCornerShape(16.dp),
-            tonalElevation = 1.dp,
+            shape = sectionShape,
+            tonalElevation = if (palette.classic) 0.dp else 1.dp,
             shadowElevation = 0.dp,
+            border = if (palette.classic) BorderStroke(1.dp, palette.border) else null,
+        ) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Row(modifier = Modifier.fillMaxWidth()) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("Classic UI", color = primaryText, fontWeight = FontWeight.SemiBold)
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            "Standard non-neon look. Leave off for the neon terminal theme (default).",
+                            color = secondaryText
+                        )
+                    }
+                    Switch(
+                        checked = classicUI,
+                        onCheckedChange = {
+                            onClassicUIChange(it)
+                            statusText = if (it) "Enabled Classic UI" else "Disabled Classic UI"
+                        },
+                        colors = nexaSwitchColors(palette),
+                    )
+                }
+            }
+        }
+
+        Spacer(Modifier.height(20.dp))
+
+        Text(if (palette.classic) "NETWORK" else "Network", color = secondaryText)
+        Spacer(Modifier.height(8.dp))
+        Surface(
+            modifier = Modifier.fillMaxWidth(),
+            color = cardBg,
+            shape = sectionShape,
+            tonalElevation = if (palette.classic) 0.dp else 1.dp,
+            shadowElevation = 0.dp,
+            border = if (palette.classic) BorderStroke(1.dp, palette.border) else null,
         ) {
             Column(modifier = Modifier.padding(16.dp)) {
                 Text("Node URL", color = primaryText, fontWeight = FontWeight.SemiBold)
@@ -1655,10 +2206,12 @@ private fun SettingsScreen(walletManager: WalletManager) {
                     onValueChange = { nodeUrlInput = it },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
-                    placeholder = { Text(walletManager.defaultNodeUrl()) }
+                    placeholder = { Text(walletManager.defaultNodeUrl(), color = secondaryText) },
+                    colors = nexaFieldColors(palette),
                 )
                 Spacer(Modifier.height(12.dp))
-                Button(
+                PrimaryActionButton(
+                    text = "Save node",
                     onClick = {
                         statusText = null
                         scope.launch {
@@ -1670,10 +2223,9 @@ private fun SettingsScreen(walletManager: WalletManager) {
                             }
                         }
                     },
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text("Save node")
-                }
+                    palette = palette,
+                    modifier = Modifier.fillMaxWidth(),
+                )
                 Spacer(Modifier.height(10.dp))
                 KeyValueRow(
                     label = "Current",
@@ -1686,14 +2238,15 @@ private fun SettingsScreen(walletManager: WalletManager) {
 
         Spacer(Modifier.height(20.dp))
 
-        Text("Security", color = secondaryText)
+        Text(if (palette.classic) "SECURITY" else "Security", color = secondaryText)
         Spacer(Modifier.height(8.dp))
         Surface(
             modifier = Modifier.fillMaxWidth(),
             color = cardBg,
-            shape = RoundedCornerShape(16.dp),
-            tonalElevation = 1.dp,
+            shape = sectionShape,
+            tonalElevation = if (palette.classic) 0.dp else 1.dp,
             shadowElevation = 0.dp,
+            border = if (palette.classic) BorderStroke(1.dp, palette.border) else null,
         ) {
             Column(modifier = Modifier.padding(16.dp)) {
                 Row(modifier = Modifier.fillMaxWidth()) {
@@ -1708,7 +2261,8 @@ private fun SettingsScreen(walletManager: WalletManager) {
                             requireDeviceAuth = it
                             MoneroConfig.setRequireDeviceAuth(context, it)
                             statusText = if (it) "Enabled device auth" else "Disabled device auth"
-                        }
+                        },
+                        colors = nexaSwitchColors(palette),
                     )
                 }
                 Spacer(Modifier.height(10.dp))
@@ -1725,14 +2279,55 @@ private fun SettingsScreen(walletManager: WalletManager) {
 
         Spacer(Modifier.height(20.dp))
 
-        Text("Recovery", color = secondaryText)
+        Text(if (palette.classic) "MAINTENANCE" else "Maintenance", color = secondaryText)
         Spacer(Modifier.height(8.dp))
         Surface(
             modifier = Modifier.fillMaxWidth(),
             color = cardBg,
-            shape = RoundedCornerShape(16.dp),
-            tonalElevation = 1.dp,
+            shape = sectionShape,
+            tonalElevation = if (palette.classic) 0.dp else 1.dp,
             shadowElevation = 0.dp,
+            border = if (palette.classic) BorderStroke(1.dp, palette.border) else null,
+        ) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Text("Scan cache", color = primaryText, fontWeight = FontWeight.SemiBold)
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    "Remove the persisted fast-resume cache for this network without deleting the wallet.",
+                    color = secondaryText
+                )
+                Spacer(Modifier.height(12.dp))
+                SecondaryActionButton(
+                    text = "Clear scan cache (this network)",
+                    onClick = {
+                        statusText = null
+                        scope.launch {
+                            try {
+                                walletManager.clearScanCache()
+                                statusText = "Cleared scan cache for this network"
+                            } catch (t: Throwable) {
+                                statusText = "Clear scan cache failed: ${t.message ?: t.javaClass.simpleName}"
+                            }
+                        }
+                    },
+                    palette = palette,
+                    modifier = Modifier.fillMaxWidth(),
+                    enabled = !state.walletId.isNullOrBlank(),
+                )
+            }
+        }
+
+        Spacer(Modifier.height(20.dp))
+
+        Text(if (palette.classic) "RECOVERY" else "Recovery", color = secondaryText)
+        Spacer(Modifier.height(8.dp))
+        Surface(
+            modifier = Modifier.fillMaxWidth(),
+            color = cardBg,
+            shape = sectionShape,
+            tonalElevation = if (palette.classic) 0.dp else 1.dp,
+            shadowElevation = 0.dp,
+            border = if (palette.classic) BorderStroke(1.dp, palette.border) else null,
         ) {
             Column(modifier = Modifier.padding(16.dp)) {
                 Text("Restore and rescan", color = primaryText, fontWeight = FontWeight.SemiBold)
@@ -1742,7 +2337,72 @@ private fun SettingsScreen(walletManager: WalletManager) {
                     color = secondaryText
                 )
                 Spacer(Modifier.height(12.dp))
-                Button(
+                OutlinedTextField(
+                    value = restoreHeightInput,
+                    onValueChange = {
+                        restoreHeightInput = it
+                        statusText = null
+                    },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                    keyboardOptions = KeyboardOptions.Default.copy(keyboardType = KeyboardType.Number),
+                    placeholder = { Text((state.syncStatus?.restoreHeight ?: 0L).toString(), color = secondaryText) },
+                    label = { Text("Restore height") },
+                    colors = nexaFieldColors(palette),
+                )
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    "This resets scan state and starts over from the height you enter.",
+                    color = secondaryText
+                )
+                Spacer(Modifier.height(12.dp))
+                SecondaryActionButton(
+                    text = "Rescan from height",
+                    onClick = {
+                        statusText = null
+                        scope.launch {
+                            val height = parseRestoreHeightInput(restoreHeightInput)
+                            if (height == null) {
+                                statusText = "Enter a valid restore height"
+                                return@launch
+                            }
+
+                            try {
+                                statusText = "Rescanning from $height"
+                                walletManager.rescanFromHeight(height)
+                                statusText = "Rescan completed from $height"
+                            } catch (t: Throwable) {
+                                statusText = "Rescan failed: ${t.message ?: t.javaClass.simpleName}"
+                            }
+                        }
+                    },
+                    palette = palette,
+                    modifier = Modifier.fillMaxWidth(),
+                    enabled = !state.walletId.isNullOrBlank() && !state.refreshInProgress,
+                )
+                Spacer(Modifier.height(8.dp))
+                SecondaryActionButton(
+                    text = "Full rescan (from block 0)",
+                    onClick = {
+                        restoreHeightInput = "0"
+                        statusText = null
+                        scope.launch {
+                            try {
+                                statusText = "Running full rescan from 0"
+                                walletManager.rescanFromHeight(0L)
+                                statusText = "Full rescan completed"
+                            } catch (t: Throwable) {
+                                statusText = "Full rescan failed: ${t.message ?: t.javaClass.simpleName}"
+                            }
+                        }
+                    },
+                    palette = palette,
+                    modifier = Modifier.fillMaxWidth(),
+                    enabled = !state.walletId.isNullOrBlank() && !state.refreshInProgress,
+                )
+                Spacer(Modifier.height(12.dp))
+                PrimaryActionButton(
+                    text = "Apply recovery settings",
                     onClick = {
                         statusText = null
                         gapLimitError = null
@@ -1783,10 +2443,9 @@ private fun SettingsScreen(walletManager: WalletManager) {
                             }
                         }
                     },
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text("Apply recovery settings")
-                }
+                    palette = palette,
+                    modifier = Modifier.fillMaxWidth(),
+                )
 
                 Spacer(Modifier.height(12.dp))
 
@@ -1796,9 +2455,12 @@ private fun SettingsScreen(walletManager: WalletManager) {
                         Spacer(Modifier.height(4.dp))
                         Text("Only change scan lookahead if an import appears incomplete after using the right restore height.", color = secondaryText)
                     }
-                    Button(onClick = { showAdvancedRecovery = !showAdvancedRecovery }) {
-                        Text(if (showAdvancedRecovery) "Hide" else "Show")
-                    }
+                    SecondaryActionButton(
+                        text = if (showAdvancedRecovery) "Hide" else "Show",
+                        onClick = { showAdvancedRecovery = !showAdvancedRecovery },
+                        palette = palette,
+                        modifier = Modifier.height(40.dp),
+                    )
                 }
 
                 if (showAdvancedRecovery) {
@@ -1816,11 +2478,12 @@ private fun SettingsScreen(walletManager: WalletManager) {
                         modifier = Modifier.fillMaxWidth(),
                         isError = gapLimitError != null,
                         keyboardOptions = KeyboardOptions.Default.copy(keyboardType = KeyboardType.Number),
-                        placeholder = { Text(MoneroConfig.DEFAULT_GAP_LIMIT.toString()) }
+                        placeholder = { Text(MoneroConfig.DEFAULT_GAP_LIMIT.toString(), color = secondaryText) },
+                        colors = nexaFieldColors(palette),
                     )
                     Text(
                         gapLimitError ?: "Valid range: 1..100000 (default ${MoneroConfig.DEFAULT_GAP_LIMIT})",
-                        color = if (gapLimitError != null) Color(0xFFFF3B30) else secondaryText
+                        color = if (gapLimitError != null) palette.danger else secondaryText
                     )
 
                     Spacer(Modifier.height(12.dp))
@@ -1837,11 +2500,12 @@ private fun SettingsScreen(walletManager: WalletManager) {
                         modifier = Modifier.fillMaxWidth(),
                         isError = accountGapError != null,
                         keyboardOptions = KeyboardOptions.Default.copy(keyboardType = KeyboardType.Number),
-                        placeholder = { Text(MoneroConfig.DEFAULT_ACCOUNT_GAP.toString()) }
+                        placeholder = { Text(MoneroConfig.DEFAULT_ACCOUNT_GAP.toString(), color = secondaryText) },
+                        colors = nexaFieldColors(palette),
                     )
                     Text(
                         accountGapError ?: "Valid range: 1..1000 (default ${MoneroConfig.DEFAULT_ACCOUNT_GAP})",
-                        color = if (accountGapError != null) Color(0xFFFF3B30) else secondaryText
+                        color = if (accountGapError != null) palette.danger else secondaryText
                     )
 
                     Spacer(Modifier.height(12.dp))
@@ -1883,4 +2547,10 @@ private fun parseXmrToPiconero(xmr: String): Long {
     val fracPadded = frac.padEnd(12, '0')
     val fracVal = if (fracPadded.isEmpty()) 0L else fracPadded.toLong()
     return whole * 1_000_000_000_000L + fracVal
+}
+
+private fun parseRestoreHeightInput(raw: String): Long? {
+    val trimmed = raw.trim()
+    if (trimmed.isEmpty()) return null
+    return trimmed.toLongOrNull()?.takeIf { it >= 0L }
 }

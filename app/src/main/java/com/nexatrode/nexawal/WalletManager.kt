@@ -53,7 +53,6 @@ class WalletManager(
     private val appContext: Context,
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
 ) {
-
     @Serializable
     data class ReceiveSubaddressEntry(
         val accountIndex: Int = 0,
@@ -200,7 +199,7 @@ class WalletManager(
      *
      * Public TLS node for non-local testing.
      */
-    fun defaultNodeUrl(): String = "http://10.0.2.2:18081"
+    fun defaultNodeUrl(): String = "http://127.0.0.1:18092"
 
     /**
      * Effective node URL to use for walletcore operations.
@@ -209,10 +208,19 @@ class WalletManager(
      */
     fun currentNodeUrl(): String = _state.value.nodeUrl ?: defaultNodeUrl()
 
+    private fun filterJsonForSubaddressMinor(minor: Int): String {
+        require(minor >= 0) { "subaddress minor must be >= 0" }
+        return JSONObject()
+            .put("subaddress_minor", minor)
+            .toString()
+    }
+
     private fun migrateLegacyDefaultNodeUrl(nodeUrl: String): String {
         return when (normalizeNodeUrl(nodeUrl)) {
             "https://node.sethforprivacy.com:443",
-            "https://node.monerod.org:443" -> defaultNodeUrl()
+            "https://node.monerod.org:443",
+            "http://192.168.4.137:18081",
+            "http://10.0.2.2:18081" -> defaultNodeUrl()
             else -> normalizeNodeUrl(nodeUrl)
         }
     }
@@ -221,10 +229,10 @@ class WalletManager(
      * Normalize user input into a URL string that walletcore expects.
      *
      * Accepts:
-     * - "10.0.2.2:18081" -> "http://10.0.2.2:18081"
+     * - "10.0.2.2:18092" -> "http://10.0.2.2:18092"
      * - "node.example.com:443" -> "https://node.example.com:443"
-     * - "http://10.0.2.2:18081" (unchanged)
-     * - "https://example.com:18081" (unchanged)
+     * - "http://10.0.2.2:18092" (unchanged)
+     * - "https://example.com:18092" (unchanged)
      *
      * Trims whitespace and rejects blank values.
      */
@@ -313,16 +321,19 @@ class WalletManager(
      * - log a clear diagnostic
      * - store a human-readable lastError (non-fatal)
      */
-    private fun deriveAndStorePrimaryAddressBestEffort(
+    private suspend fun deriveAndStorePrimaryAddressBestEffort(
         mnemonic: String,
         mainnet: Boolean,
     ) {
-        val derived = runCatching {
-            WalletCore.derivePrimaryAddressFromMnemonic(
-                mnemonic = mnemonic.trim(),
-                mainnet = mainnet
-            )
-        }.onFailure { t ->
+        val result = withContext(ioDispatcher) {
+            runCatching {
+                WalletCore.derivePrimaryAddressFromMnemonic(
+                    mnemonic = mnemonic.trim(),
+                    mainnet = mainnet
+                )
+            }
+        }
+        val derived = result.onFailure { t ->
             Log.w(
                 "WalletManager",
                 "derivePrimaryAddressFromMnemonic failed: ${t.message ?: t.toString()}"
@@ -450,11 +461,13 @@ class WalletManager(
 
         // Derive and cache primary address for UI (iOS parity with WalletView.walletAddress).
         // If derivation fails, log and surface it (non-fatal) instead of silently producing null.
-        val derivedAddress: String? = runCatching {
-            WalletCore.derivePrimaryAddressFromMnemonic(
-                mnemonic = mnemonic.trim(),
-                mainnet = mainnet
-            )
+        val derivedAddress: String? = withContext(ioDispatcher) {
+            runCatching {
+                WalletCore.derivePrimaryAddressFromMnemonic(
+                    mnemonic = mnemonic.trim(),
+                    mainnet = mainnet
+                )
+            }
         }.onFailure { t ->
             Log.w(
                 "WalletManager",
@@ -484,7 +497,9 @@ class WalletManager(
         }
 
         // Best-effort: import cache from disk if present.
-        importCacheIfPresent(walletId)
+        withContext(ioDispatcher) {
+            importCacheIfPresent(walletId)
+        }
         // Refresh status snapshot after open/import.
         updateStatusSnapshot(walletId)
 
@@ -547,7 +562,9 @@ class WalletManager(
         }
 
         // Snapshot status before refresh starts (helps diagnose daemon connectivity / cleartext issues).
-        runCatching { WalletCore.syncStatus(walletId) }
+        withContext(ioDispatcher) {
+            runCatching { WalletCore.syncStatus(walletId) }
+        }
             .onSuccess { st ->
                 Log.i(
                     "WalletManager",
@@ -559,7 +576,9 @@ class WalletManager(
             }
 
         // Core-side last error message (best-effort). This is especially useful when async refresh workers fail silently.
-        runCatching { WalletCore.lastErrorMessage() }
+        withContext(ioDispatcher) {
+            runCatching { WalletCore.lastErrorMessage() }
+        }
             .onSuccess { msg ->
                 if (!msg.isNullOrBlank()) {
                     Log.w("WalletManager", "Core lastErrorMessage (preflight): $msg")
@@ -576,7 +595,7 @@ class WalletManager(
             if (job.isActive) {
                 Log.i("WalletManager", "Refresh already in progress; joining existing job walletId=$walletId")
                 job.join()
-                return _state.value.syncStatus ?: WalletCore.syncStatus(walletId)
+                return _state.value.syncStatus ?: withContext(ioDispatcher) { WalletCore.syncStatus(walletId) }
             }
         }
 
@@ -584,22 +603,30 @@ class WalletManager(
         // This protects against accidental double-starts due to UI recomposition or rapid taps.
         if (refreshInProgress.get()) {
             Log.i("WalletManager", "Refresh already in progress (flag); skipping new start walletId=$walletId")
-            return _state.value.syncStatus ?: WalletCore.syncStatus(walletId)
+            return _state.value.syncStatus ?: withContext(ioDispatcher) { WalletCore.syncStatus(walletId) }
         }
 
         refreshCancelRequested.set(false)
         refreshInProgress.set(true)
+        val initialTargetHeight = probedDaemonHeight?.takeIf { it > 0L }
+        if (initialTargetHeight != null) {
+            Log.i(
+                "WalletManager",
+                "Refresh preflight target height seeded from OkHttp probe: $initialTargetHeight"
+            )
+        }
+
         _state.value = _state.value.copy(
             refreshInProgress = true,
             refreshStartedAtMs = System.currentTimeMillis(),
             refreshLastProgressAtMs = null,
             lastError = null,
-            refreshTargetHeight = null,
+            refreshTargetHeight = initialTargetHeight,
             gapLimit = gapLimit,
             accountGap = accountGap,
         )
 
-        val job = scope.launch {
+        val job = scope.launch(ioDispatcher) {
             try {
                 withContext(ioDispatcher) {
                     // iOS parity: apply scan tuning knobs before starting refresh.
@@ -616,6 +643,47 @@ class WalletManager(
                         Log.w("WalletManager", "Failed to apply accountGap=$accountGap: ${t.message ?: t.javaClass.simpleName}")
                     }
 
+                    runCatching {
+                        WalletCore.setEnv("WALLETCORE_BULK_MODE", ANDROID_BULK_MODE)
+                    }.onFailure { t ->
+                        Log.w(
+                            "WalletManager",
+                            "Failed to apply WALLETCORE_BULK_MODE=$ANDROID_BULK_MODE: ${t.message ?: t.javaClass.simpleName}"
+                        )
+                    }
+
+                    runCatching {
+                        WalletCore.setEnv("WALLETCORE_BULK_FETCH_BATCH", ANDROID_BULK_FETCH_BATCH.toString())
+                    }.onFailure { t ->
+                        Log.w(
+                            "WalletManager",
+                            "Failed to apply WALLETCORE_BULK_FETCH_BATCH=$ANDROID_BULK_FETCH_BATCH: ${t.message ?: t.javaClass.simpleName}"
+                        )
+                    }
+
+                    runCatching {
+                        WalletCore.setEnv("WALLETCORE_UPSTREAM_BLOCK_BATCH", ANDROID_UPSTREAM_BLOCK_BATCH.toString())
+                    }.onFailure { t ->
+                        Log.w(
+                            "WalletManager",
+                            "Failed to apply WALLETCORE_UPSTREAM_BLOCK_BATCH=$ANDROID_UPSTREAM_BLOCK_BATCH: ${t.message ?: t.javaClass.simpleName}"
+                        )
+                    }
+
+                    runCatching {
+                        WalletCore.setEnv("WALLETCORE_SCAN_LOG", "0")
+                    }.onFailure { t ->
+                        Log.w(
+                            "WalletManager",
+                            "Failed to apply WALLETCORE_SCAN_LOG=0: ${t.message ?: t.javaClass.simpleName}"
+                        )
+                    }
+
+                    Log.i(
+                        "WalletManager",
+                        "Refresh tuning applied: gapLimit=$gapLimit accountGap=$accountGap bulkMode=$ANDROID_BULK_MODE bulkFetchBatch=$ANDROID_BULK_FETCH_BATCH upstreamBlockBatch=$ANDROID_UPSTREAM_BLOCK_BATCH scanLog=0"
+                    )
+
                     // Mirror iOS: start async refresh in the core, then poll `syncStatus` until completion.
                     // This avoids blocking indefinitely inside a single JNI call (sync refresh can hang).
                     Log.i("WalletManager", "ASYNC_REFRESH_PATH_ACTIVE: calling wallet_refresh_async walletId=$walletId nodeUrl=$nodeUrl (gapLimit=$gapLimit accountGap=$accountGap)")
@@ -623,7 +691,9 @@ class WalletManager(
                 }
 
                 // Snapshot status right after refresh start.
-                runCatching { WalletCore.syncStatus(walletId) }
+                withContext(ioDispatcher) {
+                    runCatching { WalletCore.syncStatus(walletId) }
+                }
                     .onSuccess { st ->
                         Log.i(
                             "WalletManager",
@@ -638,7 +708,9 @@ class WalletManager(
                 val st = waitForRefreshCompletion(walletId = walletId)
 
                 // Final export at end of refresh (authoritative).
-                exportCacheAndPersist(walletId)
+                withContext(ioDispatcher) {
+                    exportCacheAndPersist(walletId)
+                }
 
                 _state.value = _state.value.copy(
                     refreshInProgress = false,
@@ -650,14 +722,18 @@ class WalletManager(
                     gapLimit = null,
                     accountGap = null,
                 )
-                refreshWalletDataSnapshots()
+                refreshWalletDataSnapshotsNow(walletId)
             } catch (ce: CancellationException) {
                 // Kotlin-side cancellation (we still request core cancel in cancelRefresh()).
-                val st = runCatching { WalletCore.syncStatus(walletId) }.getOrNull()
+                val st = withContext(ioDispatcher) {
+                    runCatching { WalletCore.syncStatus(walletId) }.getOrNull()
+                }
                 if (st != null) {
                     _state.value = _state.value.copy(syncStatus = st)
                 }
-                exportCacheAndPersist(walletId)
+                withContext(ioDispatcher) {
+                    exportCacheAndPersist(walletId)
+                }
                 _state.value = _state.value.copy(
                     refreshInProgress = false,
                     refreshStartedAtMs = null,
@@ -668,7 +744,9 @@ class WalletManager(
                 )
             } catch (t: Throwable) {
                 // Best-effort: persist progress even on failure.
-                exportCacheAndPersist(walletId)
+                withContext(ioDispatcher) {
+                    exportCacheAndPersist(walletId)
+                }
                 val msg = t.message ?: t.javaClass.simpleName
                 _state.value = _state.value.copy(
                     refreshInProgress = false,
@@ -687,7 +765,122 @@ class WalletManager(
         refreshJob = job
         job.join()
 
-        return _state.value.syncStatus ?: WalletCore.syncStatus(walletId)
+        return _state.value.syncStatus ?: withContext(ioDispatcher) { WalletCore.syncStatus(walletId) }
+    }
+
+    /**
+     * Start a refresh from the manager-owned scope so it survives screen transitions.
+     *
+     * The wallet setup screen is removed immediately after a successful import/open, which cancels
+     * coroutines tied to that composable scope. Using the manager scope preserves iOS-like
+     * "import then sync immediately" behavior on a fresh install.
+     */
+    fun refreshWalletInBackground(): Job {
+        return scope.launch(ioDispatcher) {
+            // Let Compose finish the wallet-screen transition before native refresh starts.
+            // On emulators, starting a long scan during first-frame/JIT work can trigger false ANRs.
+            delay(1_500L)
+            runCatching {
+                refreshWallet()
+            }.onFailure { t ->
+                _state.value = _state.value.copy(lastError = t.message ?: t.javaClass.simpleName)
+            }
+        }
+    }
+
+    /**
+     * Force a clean rescan from a specific height.
+     *
+     * Mirrors the iOS behavior:
+     * - reset the core scan cursor
+     * - drop the persisted cache so stale state is not restored next launch
+     * - persist the new restore height to metadata
+     * - start a fresh refresh cycle
+     */
+    suspend fun rescanFromHeight(fromHeight: Long): WalletCore.SyncStatus {
+        require(fromHeight >= 0L) { "fromHeight must be >= 0" }
+
+        val walletId = _state.value.walletId ?: throw IllegalStateException("No wallet open")
+        val currentStatus = _state.value.syncStatus
+
+        withContext(ioDispatcher) {
+            WalletCore.forceRescanFromHeight(walletId, fromHeight)
+
+            val cache = cacheFile(walletId, mainnet = true)
+            if (cache.exists()) {
+                runCatching { cache.delete() }
+                    .onFailure { t ->
+                        Log.w(
+                            "WalletManager",
+                            "RESCAN delete cache failed walletId=$walletId file=${cache.absolutePath} err=${t.message ?: t.javaClass.simpleName}"
+                        )
+                    }
+            }
+
+            runCatching {
+                val f = metadataFile()
+                if (f.exists()) {
+                    val meta = readMetadata()
+                    persistMetadata(
+                        meta.copy(
+                            restoreHeight = fromHeight,
+                            savedAtMs = System.currentTimeMillis(),
+                        )
+                    )
+                }
+            }.onFailure { t ->
+                Log.w(
+                    "WalletManager",
+                    "RESCAN metadata update failed walletId=$walletId height=$fromHeight err=${t.message ?: t.javaClass.simpleName}"
+                )
+            }
+        }
+
+        lastExportCacheHash = null
+        lastExportCacheLen = null
+        lastExportAtMs = 0L
+
+        _state.value = _state.value.copy(
+            syncStatus = currentStatus?.copy(
+                chainHeight = maxOf(currentStatus.chainHeight, fromHeight),
+                lastScanned = fromHeight,
+                restoreHeight = fromHeight,
+            ),
+            balance = WalletCore.Balance(0L, 0L),
+            balanceIsStaleWhileSyncing = false,
+            lastError = null,
+        )
+
+        return refreshWallet()
+    }
+
+    /**
+     * Clear the persisted on-disk scan cache for the current wallet/network.
+     *
+     * This mirrors the iOS maintenance action:
+     * - delete the exported cache blob used for fast resume
+     * - reset export throttling so the next export is not skipped
+     *
+     * It intentionally does not mutate the in-memory wallet state.
+     */
+    suspend fun clearScanCache() {
+        val walletId = _state.value.walletId ?: throw IllegalStateException("No wallet open")
+
+        withContext(ioDispatcher) {
+            val cache = cacheFile(walletId, mainnet = true)
+            if (cache.exists()) {
+                cache.delete()
+            }
+        }
+
+        lastExportCacheHash = null
+        lastExportCacheLen = null
+        lastExportAtMs = 0L
+
+        _state.value = _state.value.copy(
+            cacheInfo = null,
+            lastError = null,
+        )
     }
 
     /**
@@ -705,15 +898,19 @@ class WalletManager(
 
         refreshCancelRequested.set(true)
 
-        runCatching {
-            WalletCore.refreshCancel(walletId)
-        }.onFailure { t ->
-            // Don't block cancellation on this.
-            _state.value = _state.value.copy(lastError = "refreshCancel failed: ${t.message ?: t.javaClass.simpleName}")
+        scope.launch {
+            withContext(ioDispatcher) {
+                runCatching {
+                    WalletCore.refreshCancel(walletId)
+                }.onFailure { t ->
+                    // Don't block cancellation on this.
+                    _state.value = _state.value.copy(lastError = "refreshCancel failed: ${t.message ?: t.javaClass.simpleName}")
+                }
+                exportCacheAndPersist(walletId)
+            }
         }
 
         refreshJob?.cancel()
-        exportCacheAndPersist(walletId)
 
         _state.value = _state.value.copy(
             refreshInProgress = false,
@@ -730,7 +927,11 @@ class WalletManager(
      */
     fun snapshotState() {
         val walletId = _state.value.walletId ?: return
-        exportCacheAndPersist(walletId)
+        scope.launch {
+            withContext(ioDispatcher) {
+                exportCacheAndPersist(walletId)
+            }
+        }
     }
 
     /**
@@ -738,7 +939,9 @@ class WalletManager(
      */
     fun refreshStatusSnapshot() {
         val walletId = _state.value.walletId ?: return
-        updateStatusSnapshot(walletId)
+        scope.launch {
+            updateStatusSnapshot(walletId)
+        }
     }
 
     /**
@@ -748,7 +951,15 @@ class WalletManager(
      */
     fun refreshBalanceSnapshot() {
         val walletId = _state.value.walletId ?: return
-        val bal = runCatching { WalletCore.getBalance(walletId) }.getOrNull()
+        scope.launch {
+            refreshBalanceSnapshotNow(walletId)
+        }
+    }
+
+    private suspend fun refreshBalanceSnapshotNow(walletId: String) {
+        val bal = withContext(ioDispatcher) {
+            runCatching { WalletCore.getBalance(walletId) }.getOrNull()
+        }
         if (bal != null) {
             applyBalanceSnapshot(
                 balance = bal,
@@ -764,7 +975,15 @@ class WalletManager(
      */
     fun refreshTransfersSnapshot() {
         val walletId = _state.value.walletId ?: return
-        val json = runCatching { WalletCore.listTransfersJson(walletId) }.getOrNull()
+        scope.launch {
+            refreshTransfersSnapshotNow(walletId)
+        }
+    }
+
+    private suspend fun refreshTransfersSnapshotNow(walletId: String) {
+        val json = withContext(ioDispatcher) {
+            runCatching { WalletCore.listTransfersJson(walletId) }.getOrNull()
+        }
         if (json != null) {
             val (parsed, parseErr) = parseTransfersJson(json)
             _state.value = _state.value.copy(
@@ -780,8 +999,15 @@ class WalletManager(
      * Convenience helper for Wallet screen to update both balance + transfers.
      */
     fun refreshWalletDataSnapshots() {
-        refreshBalanceSnapshot()
-        refreshTransfersSnapshot()
+        val walletId = _state.value.walletId ?: return
+        scope.launch {
+            refreshWalletDataSnapshotsNow(walletId)
+        }
+    }
+
+    private suspend fun refreshWalletDataSnapshotsNow(walletId: String) {
+        refreshBalanceSnapshotNow(walletId)
+        refreshTransfersSnapshotNow(walletId)
     }
 
     private fun isZeroBalanceAuthoritative(state: UiState): Boolean {
@@ -851,6 +1077,47 @@ class WalletManager(
         }
     }
 
+    suspend fun getBalance(fromSubaddressMinor: Int): WalletCore.Balance {
+        require(fromSubaddressMinor >= 0) { "fromSubaddressMinor must be >= 0" }
+        val walletId = _state.value.walletId ?: throw IllegalStateException("No wallet open")
+
+        return withContext(ioDispatcher) {
+            WalletCore.getBalanceWithFilter(
+                walletId = walletId,
+                filterJson = filterJsonForSubaddressMinor(fromSubaddressMinor),
+            )
+        }
+    }
+
+    suspend fun previewFee(
+        fromSubaddressMinor: Int,
+        destinations: List<SendJson.Destination>,
+        ringLen: Int = 16,
+    ): SendJson.FeeResult {
+        require(fromSubaddressMinor >= 0) { "fromSubaddressMinor must be >= 0" }
+        val walletId = _state.value.walletId ?: throw IllegalStateException("No wallet open")
+        val nodeUrl = _state.value.nodeUrl ?: defaultNodeUrl()
+
+        return withContext(ioDispatcher) {
+            val destinationsJson = SendJson.encodeDestinations(destinations)
+            val raw = WalletCore.previewFeeJsonWithFilter(
+                walletId = walletId,
+                destinationsJson = destinationsJson,
+                filterJson = filterJsonForSubaddressMinor(fromSubaddressMinor),
+                ringLen = ringLen,
+                nodeUrl = nodeUrl,
+            )
+            val res = SendJson.decodeFeeResult(raw)
+
+            _state.value = _state.value.copy(
+                lastFeePreview = res,
+                lastError = null,
+                lastSendOrSweepAtMs = System.currentTimeMillis(),
+            )
+            res
+        }
+    }
+
     /**
      * Send a transaction (single destination).
      *
@@ -877,7 +1144,9 @@ class WalletManager(
         val res = SendJson.decodeSendResult(raw)
 
         // Persist immediately so pending outgoing survives restart before next refresh.
-        exportCacheAndPersist(walletId)
+        withContext(ioDispatcher) {
+            exportCacheAndPersist(walletId)
+        }
 
         _state.value = _state.value.copy(
             lastSendResult = res,
@@ -886,7 +1155,50 @@ class WalletManager(
         )
 
         // Best-effort: refresh visible data snapshots (balance/transfers) after send.
-        refreshWalletDataSnapshots()
+        refreshWalletDataSnapshotsNow(walletId)
+
+        return res
+    }
+
+    suspend fun send(
+        fromSubaddressMinor: Int,
+        toAddress: String,
+        amountPiconero: Long,
+        ringLen: Int = 16,
+    ): SendJson.SendResult {
+        require(fromSubaddressMinor >= 0) { "fromSubaddressMinor must be >= 0" }
+        val walletId = _state.value.walletId ?: throw IllegalStateException("No wallet open")
+        val nodeUrl = _state.value.nodeUrl ?: defaultNodeUrl()
+
+        val raw = withContext(ioDispatcher) {
+            WalletCore.sendJsonWithFilter(
+                walletId = walletId,
+                destinationsJson = SendJson.encodeDestinations(
+                    listOf(
+                        SendJson.Destination(
+                            address = toAddress,
+                            amount = amountPiconero,
+                        )
+                    )
+                ),
+                filterJson = filterJsonForSubaddressMinor(fromSubaddressMinor),
+                ringLen = ringLen,
+                nodeUrl = nodeUrl,
+            )
+        }
+        val res = SendJson.decodeSendResult(raw)
+
+        withContext(ioDispatcher) {
+            exportCacheAndPersist(walletId)
+        }
+
+        _state.value = _state.value.copy(
+            lastSendResult = res,
+            lastError = null,
+            lastSendOrSweepAtMs = System.currentTimeMillis(),
+        )
+
+        refreshWalletDataSnapshotsNow(walletId)
 
         return res
     }
@@ -905,6 +1217,34 @@ class WalletManager(
             val raw = WalletCore.previewSweepJson(
                 walletId = walletId,
                 toAddress = toAddress,
+                ringLen = ringLen,
+                nodeUrl = nodeUrl,
+            )
+            val res = SendJson.decodeSweepPreviewResult(raw)
+
+            _state.value = _state.value.copy(
+                lastSweepPreview = res,
+                lastError = null,
+                lastSendOrSweepAtMs = System.currentTimeMillis(),
+            )
+            res
+        }
+    }
+
+    suspend fun previewSweep(
+        fromSubaddressMinor: Int,
+        toAddress: String,
+        ringLen: Int = 16,
+    ): SendJson.SweepPreviewResult {
+        require(fromSubaddressMinor >= 0) { "fromSubaddressMinor must be >= 0" }
+        val walletId = _state.value.walletId ?: throw IllegalStateException("No wallet open")
+        val nodeUrl = _state.value.nodeUrl ?: defaultNodeUrl()
+
+        return withContext(ioDispatcher) {
+            val raw = WalletCore.previewSweepJsonWithFilter(
+                walletId = walletId,
+                toAddress = toAddress,
+                filterJson = filterJsonForSubaddressMinor(fromSubaddressMinor),
                 ringLen = ringLen,
                 nodeUrl = nodeUrl,
             )
@@ -943,7 +1283,9 @@ class WalletManager(
         val res = SendJson.decodeSweepSendResult(raw)
 
         // Persist immediately so pending outgoing survives restart before next refresh.
-        exportCacheAndPersist(walletId)
+        withContext(ioDispatcher) {
+            exportCacheAndPersist(walletId)
+        }
 
         _state.value = _state.value.copy(
             lastSweepSendResult = res,
@@ -952,7 +1294,42 @@ class WalletManager(
         )
 
         // Best-effort: refresh visible data snapshots (balance/transfers) after sweep.
-        refreshWalletDataSnapshots()
+        refreshWalletDataSnapshotsNow(walletId)
+
+        return res
+    }
+
+    suspend fun sweep(
+        fromSubaddressMinor: Int,
+        toAddress: String,
+        ringLen: Int = 16,
+    ): SendJson.SweepSendResult {
+        require(fromSubaddressMinor >= 0) { "fromSubaddressMinor must be >= 0" }
+        val walletId = _state.value.walletId ?: throw IllegalStateException("No wallet open")
+        val nodeUrl = _state.value.nodeUrl ?: defaultNodeUrl()
+
+        val raw = withContext(ioDispatcher) {
+            WalletCore.sweepJsonWithFilter(
+                walletId = walletId,
+                toAddress = toAddress,
+                filterJson = filterJsonForSubaddressMinor(fromSubaddressMinor),
+                ringLen = ringLen,
+                nodeUrl = nodeUrl,
+            )
+        }
+        val res = SendJson.decodeSweepSendResult(raw)
+
+        withContext(ioDispatcher) {
+            exportCacheAndPersist(walletId)
+        }
+
+        _state.value = _state.value.copy(
+            lastSweepSendResult = res,
+            lastError = null,
+            lastSendOrSweepAtMs = System.currentTimeMillis(),
+        )
+
+        refreshWalletDataSnapshotsNow(walletId)
 
         return res
     }
@@ -974,8 +1351,10 @@ class WalletManager(
             normalized.contains("response wasn't the expected json")
     }
 
-    private fun updateStatusSnapshot(walletId: String) {
-        val st = runCatching { WalletCore.syncStatus(walletId) }.getOrNull()
+    private suspend fun updateStatusSnapshot(walletId: String) {
+        val st = withContext(ioDispatcher) {
+            runCatching { WalletCore.syncStatus(walletId) }.getOrNull()
+        }
         if (st != null) {
             _state.value = _state.value.copy(syncStatus = st)
         }
@@ -1025,7 +1404,7 @@ class WalletManager(
      */
     private suspend fun waitForRefreshCompletion(
         walletId: String,
-        pollIntervalMs: Long = 200L,
+        pollIntervalMs: Long = 1_000L,
         slowFetchWarningMs: Long = 45_000L,
         hardStallTimeoutMs: Long = 180_000L,
     ): WalletCore.SyncStatus = withContext(ioDispatcher) {
@@ -1037,15 +1416,18 @@ class WalletManager(
 
         // Periodic persistence while refresh is running.
         var lastPersistAtMs = 0L
-        val persistIntervalMs = 15_000L
+        val persistIntervalMs = 30_000L
 
         // Mirror iOS: sample core error state periodically even if progress is happening.
         var lastCoreErrSampleAtMs = 0L
-        val coreErrSampleIntervalMs = 1_000L
+        val coreErrSampleIntervalMs = 10_000L
 
-        // Mirror iOS: log progress periodically (and push syncStatus into state so UI updates continuously).
+        // Mirror iOS: log progress periodically and push syncStatus into state at a UI-safe cadence.
+        // Updating Compose state every 200ms during a 100k+ block refresh can trip emulator ANRs.
         var lastProgressLogAtMs = 0L
-        val progressLogIntervalMs = 1_000L
+        val progressLogIntervalMs = 30_000L
+        var lastUiStatusAtMs = 0L
+        val uiStatusIntervalMs = 5_000L
         var lastRateSampleAtMs = System.currentTimeMillis()
         var lastRateSampleScanned = 0L
 
@@ -1059,12 +1441,6 @@ class WalletManager(
 
             val st = WalletCore.syncStatus(walletId)
 
-            // Push status into state continuously so Compose can render progress.
-            _state.value = _state.value.copy(
-                syncStatus = st,
-                refreshLastProgressAtMs = if (lastScannedSnapshot > 0L) lastProgressAtMs else null,
-            )
-
             // Mirror iOS: sample core error state even if progress continues.
             val nowMs = System.currentTimeMillis()
 
@@ -1072,7 +1448,12 @@ class WalletManager(
             // Avoid locking onto restoreHeight as the target (which reads as chainHeight initially).
             if (targetHeight == null && st.chainHeight > st.restoreHeight) {
                 targetHeight = st.chainHeight
-                _state.value = _state.value.copy(refreshTargetHeight = targetHeight)
+                _state.value = _state.value.copy(
+                    syncStatus = st,
+                    refreshTargetHeight = targetHeight,
+                    refreshLastProgressAtMs = null,
+                )
+                lastUiStatusAtMs = nowMs
                 Log.i("WalletManager", "Refresh target height set to $targetHeight (restoreHeight=${st.restoreHeight})")
 
                 // Reset rate sampling baseline to avoid an initial "rate spike" on the first progress log.
@@ -1117,7 +1498,7 @@ class WalletManager(
 
                 Log.i(
                     "WalletManager",
-                    "⏳ Refresh progress: scanned=${st.lastScanned}, restore=${st.restoreHeight}, chain=${st.chainHeight}, target=${targetHeight ?: 0L}, remaining=$remaining, phase=$phase, avgRate=${"%.1f".format(averageBlocksPerSec)} blks/s"
+                    "⏳ Refresh progress: scanned=${st.lastScanned}, restore=${st.restoreHeight}, chain=${st.chainHeight}, target=${targetHeight ?: 0L}, remaining=$remaining, phase=$phase, intervalRate=${"%.1f".format(localBlocksPerSec)} blks/s avgRate=${"%.1f".format(averageBlocksPerSec)} blks/s"
                 )
 
                 lastRateSampleAtMs = nowMs
@@ -1131,12 +1512,19 @@ class WalletManager(
             if (st.lastScanned > lastScannedSnapshot) {
                 lastScannedSnapshot = st.lastScanned
                 lastProgressAtMs = nowMs
-                _state.value = _state.value.copy(refreshLastProgressAtMs = nowMs)
                 slowFetchWarningLogged = false
             } else if (targetHeight != null && lastScannedSnapshot == 0L) {
                 // Defensive: if we started with lastScanned=0 and target gets set, reset the timer so we
                 // don't report a stall before any blocks are scanned.
                 lastProgressAtMs = nowMs
+            }
+
+            if (nowMs - lastUiStatusAtMs >= uiStatusIntervalMs) {
+                lastUiStatusAtMs = nowMs
+                _state.value = _state.value.copy(
+                    syncStatus = st,
+                    refreshLastProgressAtMs = if (lastScannedSnapshot > 0L) lastProgressAtMs else null,
+                )
             }
 
             // Periodic cache persistence.
@@ -1217,6 +1605,15 @@ class WalletManager(
 
     companion object {
         const val DEFAULT_WALLET_ID: String = "main_wallet"
+
+        // Android emulator pays a high fixed cost per host-bridge RPC. Larger batches keep the
+        // UI responsive while reducing round trips; walletcore clamps this env to a safe range.
+        private const val ANDROID_BULK_FETCH_BATCH = 500
+        private const val ANDROID_UPSTREAM_BLOCK_BATCH = 500
+
+        // Android experiment: prefer the range-style binary endpoint while Cuprate wallet2
+        // parity is still being finished.
+        private const val ANDROID_BULK_MODE = "range"
     }
 
     private fun importCacheIfPresent(walletId: String) {
@@ -1404,20 +1801,13 @@ class WalletManager(
         // Import cache best-effort, then snapshot status.
         importCacheIfPresent(meta.walletId)
         updateStatusSnapshot(meta.walletId)
-        refreshWalletDataSnapshots()
+        refreshWalletDataSnapshotsNow(meta.walletId)
 
         val stAfterImport = runCatching { WalletCore.syncStatus(meta.walletId) }.getOrNull()
         Log.i(
             "WalletManager",
             "LOAD_STORED_WALLET afterImport walletId=${meta.walletId} syncStatusAfterImport(chainHeight=${stAfterImport?.chainHeight} lastScanned=${stAfterImport?.lastScanned} restoreHeight=${stAfterImport?.restoreHeight})"
         )
-
-        // iOS parity: after loading a stored wallet, immediately refresh.
-        // This will persist cache periodically during refresh and at completion.
-        runCatching { refreshWallet() }.onFailure { t ->
-            _state.value = _state.value.copy(lastError = t.message ?: t.javaClass.simpleName)
-        }
-        refreshWalletDataSnapshots()
 
         true
     }
