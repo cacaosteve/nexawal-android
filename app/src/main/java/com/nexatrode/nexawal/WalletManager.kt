@@ -205,6 +205,21 @@ class WalletManager(
     fun defaultNodeUrl(): String = "http://127.0.0.1:18092"
 
     /**
+     * Host:port form for Settings / status UI (iOS parity).
+     * Scheme is added only when talking to the core via [normalizeNodeUrl].
+     */
+    fun nodeAddressForDisplay(url: String = currentNodeUrl()): String {
+        val s = url.trim()
+        return when {
+            s.startsWith("https://", ignoreCase = true) -> s.drop(8)
+            s.startsWith("http://", ignoreCase = true) -> s.drop(7)
+            else -> s
+        }
+    }
+
+    fun defaultNodeAddress(): String = nodeAddressForDisplay(defaultNodeUrl())
+
+    /**
      * Effective node URL to use for walletcore operations.
      *
      * If the user has edited Settings, state.nodeUrl will take precedence.

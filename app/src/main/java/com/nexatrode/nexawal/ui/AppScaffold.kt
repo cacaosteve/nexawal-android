@@ -74,6 +74,7 @@ import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
@@ -833,7 +834,7 @@ private fun WalletScreen(
                 Text(syncDetail, color = iosSecondary)
                 Spacer(Modifier.height(10.dp))
 
-                KeyValueRow(if (palette.classic) "NODE" else "Node", state.nodeUrl ?: walletManager.defaultNodeUrl(), labelColor = iosSecondary, valueColor = iosPrimaryText)
+                KeyValueRow(if (palette.classic) "NODE" else "Node", walletManager.nodeAddressForDisplay(state.nodeUrl ?: walletManager.defaultNodeUrl()), labelColor = iosSecondary, valueColor = iosPrimaryText)
                 KeyValueRow(if (palette.classic) "SCANNED" else "Scanned", formatGrouped(lastScanned), labelColor = iosSecondary, valueColor = iosPrimaryText)
                 if (targetHeight > 0L) {
                     KeyValueRow(if (palette.classic) "NETWORK HEIGHT" else "Network Height", formatGrouped(targetHeight), labelColor = iosSecondary, valueColor = iosPrimaryText)
@@ -978,18 +979,23 @@ private fun KeyValueRow(
     labelColor: Color = Color.Gray,
     valueColor: Color = Color.Unspecified,
 ) {
-    Row(modifier = Modifier.fillMaxWidth()) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
         Text(
             label,
-            modifier = Modifier.weight(1f),
-            color = labelColor
+            color = labelColor,
         )
+        Spacer(modifier = Modifier.width(12.dp))
         Text(
             value,
+            modifier = Modifier.weight(1f),
             fontFamily = FontFamily.Monospace,
             color = valueColor,
             maxLines = 1,
-            overflow = TextOverflow.Ellipsis
+            overflow = TextOverflow.Ellipsis,
+            textAlign = TextAlign.End,
         )
     }
 }
@@ -2180,7 +2186,11 @@ private fun SettingsScreen(
     val sectionShape = RoundedCornerShape(if (palette.classic) 4.dp else 16.dp)
 
     var nodeUrlInput by remember {
-        mutableStateOf(state.nodeUrl ?: walletManager.defaultNodeUrl())
+        mutableStateOf(walletManager.nodeAddressForDisplay(state.nodeUrl ?: walletManager.defaultNodeUrl()))
+    }
+
+    LaunchedEffect(state.nodeUrl) {
+        nodeUrlInput = walletManager.nodeAddressForDisplay(state.nodeUrl ?: walletManager.defaultNodeUrl())
     }
     var networkPolicy by remember {
         mutableStateOf(MoneroConfig.networkPolicy(context))
@@ -2271,7 +2281,7 @@ private fun SettingsScreen(
 
         Spacer(Modifier.height(20.dp))
 
-        Text(if (palette.classic) "NETWORK" else "Network", color = secondaryText)
+        Text(if (palette.classic) "NETWORK & NODE" else "Network & Node", color = secondaryText)
         Spacer(Modifier.height(8.dp))
         Surface(
             modifier = Modifier.fillMaxWidth(),
@@ -2282,17 +2292,20 @@ private fun SettingsScreen(
             border = if (palette.classic) BorderStroke(1.dp, palette.border) else null,
         ) {
             Column(modifier = Modifier.padding(16.dp)) {
-                Text("Node URL", color = primaryText, fontWeight = FontWeight.SemiBold)
+                Text("Daemon hostname:port", color = primaryText, fontWeight = FontWeight.SemiBold)
                 Spacer(Modifier.height(6.dp))
-                Text("Use your local node, emulator proxy, or a trusted remote node.", color = secondaryText)
-                Spacer(Modifier.height(12.dp))
                 OutlinedTextField(
                     value = nodeUrlInput,
                     onValueChange = { nodeUrlInput = it },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
-                    placeholder = { Text(walletManager.defaultNodeUrl(), color = secondaryText) },
+                    placeholder = { Text(walletManager.defaultNodeAddress(), color = secondaryText) },
                     colors = nexaFieldColors(palette),
+                )
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    "Example: 127.0.0.1:18092\n(Full URL will be: http://127.0.0.1:18092)",
+                    color = secondaryText,
                 )
                 Spacer(Modifier.height(12.dp))
                 PrimaryActionButton(
@@ -2302,7 +2315,7 @@ private fun SettingsScreen(
                         scope.launch {
                             try {
                                 walletManager.setNodeUrl(nodeUrlInput)
-                                statusText = "Saved node URL"
+                                statusText = "Saved node"
                             } catch (t: Throwable) {
                                 statusText = "Failed to save: ${t.message ?: t.javaClass.simpleName}"
                             }
@@ -2310,13 +2323,6 @@ private fun SettingsScreen(
                     },
                     palette = palette,
                     modifier = Modifier.fillMaxWidth(),
-                )
-                Spacer(Modifier.height(10.dp))
-                KeyValueRow(
-                    label = "Current",
-                    value = state.nodeUrl ?: walletManager.defaultNodeUrl(),
-                    labelColor = secondaryText,
-                    valueColor = primaryText
                 )
             }
         }
