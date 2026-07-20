@@ -14,3 +14,7 @@
 .externalNativeBuild
 .cxx
 local.properties
+
+# Synced from MoneroWalletCoreFFI submodule on each Gradle build
+/walletcore/src/main/jniLibs/*/libmonerowalletcore.so
+/walletcore/src/main/jniLibs/*/libc++_shared.so

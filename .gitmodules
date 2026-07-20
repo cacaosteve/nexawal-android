@@ -1,0 +1,4 @@
+[submodule "MoneroWalletCoreFFI"]
+	path = MoneroWalletCoreFFI
+	url = https://github.com/cacaosteve/MoneroWalletCoreFFI.git
+	branch = walletcore/aligned-2026-07-18

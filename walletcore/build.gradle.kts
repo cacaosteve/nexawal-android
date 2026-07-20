@@ -9,6 +9,44 @@ plugins {
 val cmakeListsPath = file("src/main/cpp/CMakeLists.txt").absolutePath
 
 /**
+ * Sync prebuilt libmonerowalletcore.so from the MoneroWalletCoreFFI git submodule.
+ *
+ * Clone with: git clone --recurse-submodules …
+ * Or later:   git submodule update --init --recursive
+ * Float tip:  git submodule update --remote MoneroWalletCoreFFI
+ */
+val syncMoneroWalletCoreSo by tasks.registering {
+    group = "walletcore"
+    description = "Copies prebuilt libmonerowalletcore.so from the MoneroWalletCoreFFI submodule Artifacts/android."
+
+    val abis = listOf("arm64-v8a", "x86_64")
+    val submoduleRoot = rootProject.file("MoneroWalletCoreFFI")
+
+    inputs.files(abis.map { submoduleRoot.resolve("Artifacts/android/$it/libmonerowalletcore.so") })
+    outputs.files(abis.map { layout.projectDirectory.file("src/main/jniLibs/$it/libmonerowalletcore.so") })
+
+    doLast {
+        require(submoduleRoot.exists()) {
+            "MoneroWalletCoreFFI submodule is missing at ${submoduleRoot.absolutePath}. " +
+                "Run: git submodule update --init --recursive"
+        }
+        abis.forEach { abi ->
+            val src = submoduleRoot.resolve("Artifacts/android/$abi/libmonerowalletcore.so")
+            require(src.isFile) {
+                "Missing prebuilt core library: ${src.absolutePath}. " +
+                    "Init/update the MoneroWalletCoreFFI submodule (branch walletcore/aligned-2026-07-18), " +
+                    "or rebuild with INSTALL_TO_NEXAWAL_ANDROID=1 ./Scripts/build_android.sh in that repo."
+            }
+            val dstDir = file("src/main/jniLibs/$abi")
+            if (!dstDir.exists()) dstDir.mkdirs()
+            val dst = dstDir.resolve("libmonerowalletcore.so")
+            src.copyTo(dst, overwrite = true)
+            println("Synced libmonerowalletcore.so for $abi from submodule -> ${dst.absolutePath}")
+        }
+    }
+}
+
+/**
  * Copy libc++_shared.so from the configured Android NDK into this module's jniLibs so runtime dlopen can resolve it.
  *
  * Why:
@@ -75,6 +113,7 @@ val ensureLibcxxShared by tasks.registering {
 }
 
 tasks.matching { it.name == "preBuild" }.configureEach {
+    dependsOn(syncMoneroWalletCoreSo)
     dependsOn(ensureLibcxxShared)
 }
 
