@@ -1481,9 +1481,16 @@ private fun SendScreen(walletManager: WalletManager, palette: NexaPalette) {
         ?: "Subaddress $fromSubaddressMinor"
 
     fun canPreviewFee(): Boolean = hasWallet && toAddress.trim().isNotEmpty() && amountXmrText.trim().isNotEmpty() && !isEstimating && !isSending
-    fun canSendExact(): Boolean = canPreviewFee() && estimatedFee != null
-    fun canSendMax(): Boolean = hasWallet && toAddress.trim().isNotEmpty() && !isEstimating && !isSending
     fun amountPiconeroOrNull(): Long? = runCatching { parseXmrToPiconero(amountXmrText) }.getOrNull()
+    fun hasUnlockedForExactSend(): Boolean {
+        val amount = amountPiconeroOrNull() ?: return false
+        val fee = estimatedFee?.fee ?: return false
+        if (amount < 0L || fee < 0L) return false
+        if (amount > unlockedPiconero) return false
+        return fee <= unlockedPiconero - amount
+    }
+    fun canSendExact(): Boolean = canPreviewFee() && estimatedFee != null && hasUnlockedForExactSend()
+    fun canSendMax(): Boolean = hasWallet && toAddress.trim().isNotEmpty() && !isEstimating && !isSending
     fun totalWithFeeText(): String? {
         val fee = estimatedFee ?: return null
         val amount = amountPiconeroOrNull() ?: return null
@@ -1594,6 +1601,10 @@ private fun SendScreen(walletManager: WalletManager, palette: NexaPalette) {
             Text("Estimated fee: ${fee.feeXmr} XMR", color = palette.primaryText)
             totalWithFeeText()?.let { total ->
                 Text("Total (amount + fee): $total XMR", color = palette.secondaryText)
+            }
+            if (!hasUnlockedForExactSend()) {
+                Spacer(Modifier.height(6.dp))
+                Text("Insufficient unlocked balance for amount + fee.", color = palette.danger)
             }
             Text(
                 toAddress.trim(),
@@ -1828,7 +1839,7 @@ private fun SendScreen(walletManager: WalletManager, palette: NexaPalette) {
     if (showExactConfirmation) {
         val amountPiconero = amountPiconeroOrNull()
         AlertDialog(
-            onDismissRequest = { showExactConfirmation = false },
+            onDismissRequest = { if (!isSending) showExactConfirmation = false },
             title = { Text("Confirm Send") },
             text = {
                 Column {
@@ -1853,18 +1864,28 @@ private fun SendScreen(walletManager: WalletManager, palette: NexaPalette) {
             },
             confirmButton = {
                 PrimaryActionButton(
-                    text = "Confirm Send",
+                    text = if (isSending) "Sending..." else "Confirm Send",
                     palette = palette,
+                    enabled = !isSending,
                     onClick = {
+                        if (isSending) return@PrimaryActionButton
+                        // Disable immediately so dismiss+launch cannot race a second send.
+                        isSending = true
                         showExactConfirmation = false
                         errorText = null
                         infoText = null
                         sendResult = null
                         sweepResult = null
                         scope.launch {
-                            isSending = true
                             try {
                                 val amountPiconeroNow = parseXmrToPiconero(amountXmrText)
+                                val feePiconero = estimatedFee?.fee ?: 0L
+                                if (amountPiconeroNow > unlockedPiconero ||
+                                    feePiconero > unlockedPiconero - amountPiconeroNow
+                                ) {
+                                    errorText = "Insufficient unlocked balance for amount + fee."
+                                    return@launch
+                                }
 
                                 if (MoneroConfig.requireDeviceAuth(context)) {
                                     val activity = context as? ComponentActivity
@@ -1909,6 +1930,7 @@ private fun SendScreen(walletManager: WalletManager, palette: NexaPalette) {
                     text = "Cancel",
                     onClick = { showExactConfirmation = false },
                     palette = palette,
+                    enabled = !isSending,
                     modifier = Modifier.fillMaxWidth()
                 )
             }
@@ -1917,7 +1939,7 @@ private fun SendScreen(walletManager: WalletManager, palette: NexaPalette) {
 
     if (showMaxConfirmation) {
         AlertDialog(
-            onDismissRequest = { showMaxConfirmation = false },
+            onDismissRequest = { if (!isSending) showMaxConfirmation = false },
             title = { Text("Confirm Send Max") },
             text = {
                 Column {
@@ -1938,15 +1960,16 @@ private fun SendScreen(walletManager: WalletManager, palette: NexaPalette) {
             },
             confirmButton = {
                 PrimaryActionButton(
-                    text = "Confirm Send Max",
+                    text = if (isSending) "Sending..." else "Confirm Send Max",
                     palette = palette,
                     onClick = {
+                        if (isSending) return@PrimaryActionButton
+                        isSending = true
                         showMaxConfirmation = false
                         errorText = null
                         infoText = null
                         sendResult = null
                         scope.launch {
-                            isSending = true
                             try {
                                 if (MoneroConfig.requireDeviceAuth(context)) {
                                     val activity = context as? ComponentActivity
@@ -1979,7 +2002,7 @@ private fun SendScreen(walletManager: WalletManager, palette: NexaPalette) {
                             }
                         }
                     },
-                    enabled = sweepPreview != null,
+                    enabled = sweepPreview != null && !isSending,
                     modifier = Modifier.fillMaxWidth()
                 )
             },
@@ -1988,6 +2011,7 @@ private fun SendScreen(walletManager: WalletManager, palette: NexaPalette) {
                     text = "Cancel",
                     onClick = { showMaxConfirmation = false },
                     palette = palette,
+                    enabled = !isSending,
                     modifier = Modifier.fillMaxWidth()
                 )
             }
@@ -2100,6 +2124,15 @@ private fun SettingsScreen(
 
     var nodeUrlInput by remember {
         mutableStateOf(state.nodeUrl ?: walletManager.defaultNodeUrl())
+    }
+    var networkPolicy by remember {
+        mutableStateOf(MoneroConfig.networkPolicy(context))
+    }
+    var i2pRpcInput by remember {
+        mutableStateOf(MoneroConfig.i2pRpcAddress(context))
+    }
+    var i2pProxyInput by remember {
+        mutableStateOf(MoneroConfig.i2pHttpProxyAddress(context).orEmpty())
     }
 
     // Persisted scan tuning (iOS parity)
@@ -2227,6 +2260,85 @@ private fun SettingsScreen(
                     value = state.nodeUrl ?: walletManager.defaultNodeUrl(),
                     labelColor = secondaryText,
                     valueColor = primaryText
+                )
+            }
+        }
+
+        Spacer(Modifier.height(20.dp))
+
+        Text(if (palette.classic) "NETWORK POLICY & I2P" else "Network Policy & I2P", color = secondaryText)
+        Spacer(Modifier.height(8.dp))
+        Surface(
+            modifier = Modifier.fillMaxWidth(),
+            color = cardBg,
+            shape = sectionShape,
+            tonalElevation = if (palette.classic) 0.dp else 1.dp,
+            shadowElevation = 0.dp,
+            border = if (palette.classic) BorderStroke(1.dp, palette.border) else null,
+        ) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Text("Policy", color = primaryText, fontWeight = FontWeight.SemiBold)
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    "Clearnet uses your daemon above. I2P/hybrid use the I2P RPC node and HTTP proxy for .b32.i2p traffic.",
+                    color = secondaryText,
+                )
+                Spacer(Modifier.height(10.dp))
+                listOf(
+                    MoneroConfig.NetworkPolicy.CLEARNET to "Clearnet only",
+                    MoneroConfig.NetworkPolicy.I2P to "I2P only",
+                    MoneroConfig.NetworkPolicy.HYBRID to "Hybrid (scan clearnet, broadcast I2P)",
+                ).forEach { (policy, label) ->
+                    val selected = networkPolicy == policy
+                    SecondaryActionButton(
+                        text = if (selected) "✓ $label" else label,
+                        onClick = { networkPolicy = policy },
+                        palette = palette,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    Spacer(Modifier.height(6.dp))
+                }
+
+                val i2pEnabled = networkPolicy != MoneroConfig.NetworkPolicy.CLEARNET
+                Text("I2P RPC hostname:port", color = primaryText, fontWeight = FontWeight.SemiBold)
+                Spacer(Modifier.height(6.dp))
+                OutlinedTextField(
+                    value = i2pRpcInput,
+                    onValueChange = { i2pRpcInput = it },
+                    singleLine = true,
+                    enabled = i2pEnabled,
+                    modifier = Modifier.fillMaxWidth(),
+                    placeholder = { Text(MoneroConfig.DEFAULT_I2P_RPC_ADDRESS, color = secondaryText) },
+                    colors = nexaFieldColors(palette),
+                )
+                Spacer(Modifier.height(10.dp))
+                Text("I2P HTTP proxy host:port", color = primaryText, fontWeight = FontWeight.SemiBold)
+                Spacer(Modifier.height(6.dp))
+                OutlinedTextField(
+                    value = i2pProxyInput,
+                    onValueChange = { i2pProxyInput = it },
+                    singleLine = true,
+                    enabled = i2pEnabled,
+                    modifier = Modifier.fillMaxWidth(),
+                    placeholder = { Text("127.0.0.1:4444", color = secondaryText) },
+                    colors = nexaFieldColors(palette),
+                )
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    "Proxy example: 127.0.0.1:4444 (I2P HTTP proxy). Required for I2P-only and hybrid broadcast.",
+                    color = secondaryText,
+                )
+                Spacer(Modifier.height(12.dp))
+                PrimaryActionButton(
+                    text = "Save I2P settings",
+                    onClick = {
+                        MoneroConfig.setNetworkPolicy(context, networkPolicy)
+                        MoneroConfig.setI2pRpcAddress(context, i2pRpcInput.trim().ifEmpty { null })
+                        MoneroConfig.setI2pHttpProxyAddress(context, i2pProxyInput.trim().ifEmpty { null })
+                        statusText = "Saved I2P settings"
+                    },
+                    palette = palette,
+                    modifier = Modifier.fillMaxWidth(),
                 )
             }
         }

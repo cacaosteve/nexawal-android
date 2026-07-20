@@ -45,7 +45,7 @@ object MoneroConfig {
     /** Classic UI ON = standard non-neon look; OFF (default) = neon terminal theme. */
     const val DEFAULT_CLASSIC_UI: Boolean = false
     private const val DEFAULT_NETWORK_POLICY_RAW: String = "clearnet"
-    private const val DEFAULT_I2P_RPC_ADDRESS: String =
+    const val DEFAULT_I2P_RPC_ADDRESS: String =
         "cvxtgqjorfif6i5x5fenys6fj7hzddbgavpyutps6gphywnlklqa.b32.i2p:18081"
 
     // Safety clamps.
@@ -192,6 +192,26 @@ object MoneroConfig {
         return when (networkPolicy(context)) {
             NetworkPolicy.CLEARNET -> currentNodeUrl
             NetworkPolicy.I2P, NetworkPolicy.HYBRID -> normalizeUrl(i2pRpcAddress(context))
+        }
+    }
+
+    @JvmStatic
+    fun scanNodeUrl(context: Context, currentNodeUrl: String): String {
+        return when (networkPolicy(context)) {
+            NetworkPolicy.CLEARNET, NetworkPolicy.HYBRID -> currentNodeUrl
+            NetworkPolicy.I2P -> normalizeUrl(i2pRpcAddress(context))
+        }
+    }
+
+    /** True when daemon RPC for this policy should go through the I2P HTTP proxy. */
+    @JvmStatic
+    fun shouldUseI2pHttpProxy(context: Context, forBroadcast: Boolean): Boolean {
+        val proxy = i2pHttpProxyAddress(context)
+        if (proxy.isNullOrBlank()) return false
+        return when (networkPolicy(context)) {
+            NetworkPolicy.CLEARNET -> false
+            NetworkPolicy.I2P -> true
+            NetworkPolicy.HYBRID -> forBroadcast
         }
     }
 

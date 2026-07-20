@@ -176,6 +176,7 @@ class WalletManager(
     private var refreshJob: Job? = null
     private val refreshCancelRequested = AtomicBoolean(false)
     private val refreshInProgress = AtomicBoolean(false)
+    private val sendInFlight = AtomicBoolean(false)
 
     // Cache export throttling:
     // - avoid redundant writes when exportCache returns identical bytes repeatedly (common during steady-state polling)
@@ -207,6 +208,79 @@ class WalletManager(
      * If the user has edited Settings, state.nodeUrl will take precedence.
      */
     fun currentNodeUrl(): String = _state.value.nodeUrl ?: defaultNodeUrl()
+
+    private fun resolveBroadcastNodeUrl(): String {
+        return MoneroConfig.broadcastNodeUrl(appContext, currentNodeUrl())
+    }
+
+    private fun resolveScanNodeUrl(): String {
+        return MoneroConfig.scanNodeUrl(appContext, currentNodeUrl())
+    }
+
+    private fun applyProxyEnv(forBroadcast: Boolean) {
+        val useProxy = MoneroConfig.shouldUseI2pHttpProxy(appContext, forBroadcast = forBroadcast)
+        val proxy = MoneroConfig.i2pHttpProxyAddress(appContext)
+        if (useProxy && !proxy.isNullOrBlank()) {
+            val proxyUrl = if (proxy.startsWith("http://") || proxy.startsWith("https://")) proxy else "http://$proxy"
+            runCatching {
+                android.system.Os.setenv("HTTP_PROXY", proxyUrl, true)
+                android.system.Os.setenv("http_proxy", proxyUrl, true)
+                android.system.Os.setenv("ALL_PROXY", proxyUrl, true)
+                android.system.Os.setenv("all_proxy", proxyUrl, true)
+            }
+        } else {
+            runCatching {
+                android.system.Os.unsetenv("HTTP_PROXY")
+                android.system.Os.unsetenv("http_proxy")
+                android.system.Os.unsetenv("ALL_PROXY")
+                android.system.Os.unsetenv("all_proxy")
+            }
+        }
+    }
+
+    private fun parseProxyHostPort(raw: String): Pair<String, Int>? {
+        val trimmed = raw.trim()
+            .removePrefix("http://")
+            .removePrefix("https://")
+        val parts = trimmed.split(":")
+        if (parts.size != 2) return null
+        val host = parts[0].trim()
+        val port = parts[1].trim().toIntOrNull() ?: return null
+        if (host.isEmpty() || port <= 0) return null
+        return host to port
+    }
+
+    private fun buildDaemonHttpClient(forBroadcast: Boolean): OkHttpClient {
+        val builder = OkHttpClient.Builder()
+            .connectTimeout(5, TimeUnit.SECONDS)
+            .readTimeout(5, TimeUnit.SECONDS)
+            .writeTimeout(5, TimeUnit.SECONDS)
+
+        if (MoneroConfig.shouldUseI2pHttpProxy(appContext, forBroadcast = forBroadcast)) {
+            val proxy = MoneroConfig.i2pHttpProxyAddress(appContext)
+            val hostPort = proxy?.let { parseProxyHostPort(it) }
+            if (hostPort != null) {
+                builder.proxy(
+                    java.net.Proxy(
+                        java.net.Proxy.Type.HTTP,
+                        java.net.InetSocketAddress(hostPort.first, hostPort.second),
+                    )
+                )
+            }
+        }
+        return builder.build()
+    }
+
+    private suspend fun <T> withSendLock(block: suspend () -> T): T {
+        if (!sendInFlight.compareAndSet(false, true)) {
+            throw IllegalStateException("A send is already in progress. Wait for it to finish.")
+        }
+        return try {
+            block()
+        } finally {
+            sendInFlight.set(false)
+        }
+    }
 
     private fun filterJsonForSubaddressMinor(minor: Int): String {
         require(minor >= 0) { "subaddress minor must be >= 0" }
@@ -534,7 +608,8 @@ class WalletManager(
      */
     suspend fun refreshWallet(): WalletCore.SyncStatus {
         val walletId = _state.value.walletId ?: throw IllegalStateException("No wallet open")
-        val nodeUrl = _state.value.nodeUrl ?: defaultNodeUrl()
+        val nodeUrl = resolveScanNodeUrl()
+        applyProxyEnv(forBroadcast = false)
 
         // iOS parity: load persisted scan tuning defaults (gap limit + account lookahead).
         // Apply these to walletcore at refresh start:
@@ -545,7 +620,7 @@ class WalletManager(
         val accountGap = cfg.accountGap
 
         // Mirror iOS: log the node URL at refresh start so we can see exactly what the core is using.
-        Log.i("WalletManager", "🌐 Refresh starting with nodeURL=$nodeUrl walletId=$walletId")
+        Log.i("WalletManager", "🌐 Refresh starting with nodeURL=$nodeUrl walletId=$walletId policy=${cfg.networkPolicy}")
 
         // Dev probe: fetch /get_height via OkHttp so we can compare emulator network height vs wallet core status.
         // Important: run this on IO to avoid NetworkOnMainThreadException.
@@ -1056,9 +1131,10 @@ class WalletManager(
         ringLen: Int = 16,
     ): SendJson.FeeResult {
         val walletId = _state.value.walletId ?: throw IllegalStateException("No wallet open")
-        val nodeUrl = _state.value.nodeUrl ?: defaultNodeUrl()
+        val nodeUrl = resolveBroadcastNodeUrl()
 
         return withContext(ioDispatcher) {
+            applyProxyEnv(forBroadcast = true)
             val destinationsJson = SendJson.encodeDestinations(destinations)
             val raw = WalletCore.previewFeeJson(
                 walletId = walletId,
@@ -1096,9 +1172,10 @@ class WalletManager(
     ): SendJson.FeeResult {
         require(fromSubaddressMinor >= 0) { "fromSubaddressMinor must be >= 0" }
         val walletId = _state.value.walletId ?: throw IllegalStateException("No wallet open")
-        val nodeUrl = _state.value.nodeUrl ?: defaultNodeUrl()
+        val nodeUrl = resolveBroadcastNodeUrl()
 
         return withContext(ioDispatcher) {
+            applyProxyEnv(forBroadcast = true)
             val destinationsJson = SendJson.encodeDestinations(destinations)
             val raw = WalletCore.previewFeeJsonWithFilter(
                 walletId = walletId,
@@ -1128,11 +1205,12 @@ class WalletManager(
         toAddress: String,
         amountPiconero: Long,
         ringLen: Int = 16,
-    ): SendJson.SendResult {
+    ): SendJson.SendResult = withSendLock {
         val walletId = _state.value.walletId ?: throw IllegalStateException("No wallet open")
-        val nodeUrl = _state.value.nodeUrl ?: defaultNodeUrl()
+        val nodeUrl = resolveBroadcastNodeUrl()
 
         val raw = withContext(ioDispatcher) {
+            applyProxyEnv(forBroadcast = true)
             WalletCore.sendJson(
                 walletId = walletId,
                 toAddress = toAddress,
@@ -1157,7 +1235,7 @@ class WalletManager(
         // Best-effort: refresh visible data snapshots (balance/transfers) after send.
         refreshWalletDataSnapshotsNow(walletId)
 
-        return res
+        res
     }
 
     suspend fun send(
@@ -1165,12 +1243,13 @@ class WalletManager(
         toAddress: String,
         amountPiconero: Long,
         ringLen: Int = 16,
-    ): SendJson.SendResult {
+    ): SendJson.SendResult = withSendLock {
         require(fromSubaddressMinor >= 0) { "fromSubaddressMinor must be >= 0" }
         val walletId = _state.value.walletId ?: throw IllegalStateException("No wallet open")
-        val nodeUrl = _state.value.nodeUrl ?: defaultNodeUrl()
+        val nodeUrl = resolveBroadcastNodeUrl()
 
         val raw = withContext(ioDispatcher) {
+            applyProxyEnv(forBroadcast = true)
             WalletCore.sendJsonWithFilter(
                 walletId = walletId,
                 destinationsJson = SendJson.encodeDestinations(
@@ -1200,7 +1279,7 @@ class WalletManager(
 
         refreshWalletDataSnapshotsNow(walletId)
 
-        return res
+        res
     }
 
     /**
@@ -1211,9 +1290,10 @@ class WalletManager(
         ringLen: Int = 16,
     ): SendJson.SweepPreviewResult {
         val walletId = _state.value.walletId ?: throw IllegalStateException("No wallet open")
-        val nodeUrl = _state.value.nodeUrl ?: defaultNodeUrl()
+        val nodeUrl = resolveBroadcastNodeUrl()
 
         return withContext(ioDispatcher) {
+            applyProxyEnv(forBroadcast = true)
             val raw = WalletCore.previewSweepJson(
                 walletId = walletId,
                 toAddress = toAddress,
@@ -1238,9 +1318,10 @@ class WalletManager(
     ): SendJson.SweepPreviewResult {
         require(fromSubaddressMinor >= 0) { "fromSubaddressMinor must be >= 0" }
         val walletId = _state.value.walletId ?: throw IllegalStateException("No wallet open")
-        val nodeUrl = _state.value.nodeUrl ?: defaultNodeUrl()
+        val nodeUrl = resolveBroadcastNodeUrl()
 
         return withContext(ioDispatcher) {
+            applyProxyEnv(forBroadcast = true)
             val raw = WalletCore.previewSweepJsonWithFilter(
                 walletId = walletId,
                 toAddress = toAddress,
@@ -1268,11 +1349,12 @@ class WalletManager(
     suspend fun sweep(
         toAddress: String,
         ringLen: Int = 16,
-    ): SendJson.SweepSendResult {
+    ): SendJson.SweepSendResult = withSendLock {
         val walletId = _state.value.walletId ?: throw IllegalStateException("No wallet open")
-        val nodeUrl = _state.value.nodeUrl ?: defaultNodeUrl()
+        val nodeUrl = resolveBroadcastNodeUrl()
 
         val raw = withContext(ioDispatcher) {
+            applyProxyEnv(forBroadcast = true)
             WalletCore.sweepJson(
                 walletId = walletId,
                 toAddress = toAddress,
@@ -1296,19 +1378,20 @@ class WalletManager(
         // Best-effort: refresh visible data snapshots (balance/transfers) after sweep.
         refreshWalletDataSnapshotsNow(walletId)
 
-        return res
+        res
     }
 
     suspend fun sweep(
         fromSubaddressMinor: Int,
         toAddress: String,
         ringLen: Int = 16,
-    ): SendJson.SweepSendResult {
+    ): SendJson.SweepSendResult = withSendLock {
         require(fromSubaddressMinor >= 0) { "fromSubaddressMinor must be >= 0" }
         val walletId = _state.value.walletId ?: throw IllegalStateException("No wallet open")
-        val nodeUrl = _state.value.nodeUrl ?: defaultNodeUrl()
+        val nodeUrl = resolveBroadcastNodeUrl()
 
         val raw = withContext(ioDispatcher) {
+            applyProxyEnv(forBroadcast = true)
             WalletCore.sweepJsonWithFilter(
                 walletId = walletId,
                 toAddress = toAddress,
@@ -1331,7 +1414,7 @@ class WalletManager(
 
         refreshWalletDataSnapshotsNow(walletId)
 
-        return res
+        res
     }
 
     private fun parseTransfersJson(json: String): Pair<List<Transfer>, String?> {
@@ -1374,11 +1457,7 @@ class WalletManager(
 
         val url = "$base/get_height"
 
-        val client = OkHttpClient.Builder()
-            .connectTimeout(5, TimeUnit.SECONDS)
-            .readTimeout(5, TimeUnit.SECONDS)
-            .writeTimeout(5, TimeUnit.SECONDS)
-            .build()
+        val client = buildDaemonHttpClient(forBroadcast = false)
 
         val req = Request.Builder()
             .url(url)
