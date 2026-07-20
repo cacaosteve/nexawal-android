@@ -4,6 +4,7 @@ import android.util.Log
 
 import android.content.Context
 import com.nexatrode.nexawal.logic.SendGate
+import com.nexatrode.nexawal.logic.SendSafety
 import com.nexatrode.nexawal.walletcore.WalletCore
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
@@ -280,6 +281,28 @@ class WalletManager(
             block()
         } finally {
             sendGate.end()
+        }
+    }
+
+    /**
+     * Cuprate (:18092) sibling Monero RPC (:18081) retry for fee_rate failures that clearly
+     * happened before spend/broadcast (mirrors iOS WalletManager).
+     */
+    private fun <T> withOptionalSiblingFeeRetry(nodeUrl: String, op: (String) -> T): T {
+        return try {
+            op(nodeUrl)
+        } catch (t: Throwable) {
+            val coreMsg = runCatching { WalletCore.lastErrorMessage() }.getOrNull().orEmpty()
+            val fallback = SendSafety.shouldRetryViaSiblingMonerod(
+                errorText = t.message.orEmpty(),
+                coreMessage = coreMsg,
+                endpoint = nodeUrl,
+            ) ?: throw t
+            Log.i(
+                "WalletManager",
+                "Cuprate fee RPC unavailable at $nodeUrl; retrying via sibling Monero RPC $fallback",
+            )
+            op(fallback)
         }
     }
 
@@ -1137,12 +1160,14 @@ class WalletManager(
         return withContext(ioDispatcher) {
             applyProxyEnv(forBroadcast = true)
             val destinationsJson = SendJson.encodeDestinations(destinations)
-            val raw = WalletCore.previewFeeJson(
-                walletId = walletId,
-                destinationsJson = destinationsJson,
-                ringLen = ringLen,
-                nodeUrl = nodeUrl,
-            )
+            val raw = withOptionalSiblingFeeRetry(nodeUrl) { endpoint ->
+                WalletCore.previewFeeJson(
+                    walletId = walletId,
+                    destinationsJson = destinationsJson,
+                    ringLen = ringLen,
+                    nodeUrl = endpoint,
+                )
+            }
             val res = SendJson.decodeFeeResult(raw)
 
             _state.value = _state.value.copy(
@@ -1178,13 +1203,15 @@ class WalletManager(
         return withContext(ioDispatcher) {
             applyProxyEnv(forBroadcast = true)
             val destinationsJson = SendJson.encodeDestinations(destinations)
-            val raw = WalletCore.previewFeeJsonWithFilter(
-                walletId = walletId,
-                destinationsJson = destinationsJson,
-                filterJson = filterJsonForSubaddressMinor(fromSubaddressMinor),
-                ringLen = ringLen,
-                nodeUrl = nodeUrl,
-            )
+            val raw = withOptionalSiblingFeeRetry(nodeUrl) { endpoint ->
+                WalletCore.previewFeeJsonWithFilter(
+                    walletId = walletId,
+                    destinationsJson = destinationsJson,
+                    filterJson = filterJsonForSubaddressMinor(fromSubaddressMinor),
+                    ringLen = ringLen,
+                    nodeUrl = endpoint,
+                )
+            }
             val res = SendJson.decodeFeeResult(raw)
 
             _state.value = _state.value.copy(
@@ -1212,13 +1239,15 @@ class WalletManager(
 
         val raw = withContext(ioDispatcher) {
             applyProxyEnv(forBroadcast = true)
-            WalletCore.sendJson(
-                walletId = walletId,
-                toAddress = toAddress,
-                amountPiconero = amountPiconero,
-                ringLen = ringLen,
-                nodeUrl = nodeUrl,
-            )
+            withOptionalSiblingFeeRetry(nodeUrl) { endpoint ->
+                WalletCore.sendJson(
+                    walletId = walletId,
+                    toAddress = toAddress,
+                    amountPiconero = amountPiconero,
+                    ringLen = ringLen,
+                    nodeUrl = endpoint,
+                )
+            }
         }
         val res = SendJson.decodeSendResult(raw)
 
@@ -1251,20 +1280,22 @@ class WalletManager(
 
         val raw = withContext(ioDispatcher) {
             applyProxyEnv(forBroadcast = true)
-            WalletCore.sendJsonWithFilter(
-                walletId = walletId,
-                destinationsJson = SendJson.encodeDestinations(
-                    listOf(
-                        SendJson.Destination(
-                            address = toAddress,
-                            amount = amountPiconero,
+            withOptionalSiblingFeeRetry(nodeUrl) { endpoint ->
+                WalletCore.sendJsonWithFilter(
+                    walletId = walletId,
+                    destinationsJson = SendJson.encodeDestinations(
+                        listOf(
+                            SendJson.Destination(
+                                address = toAddress,
+                                amount = amountPiconero,
+                            )
                         )
-                    )
-                ),
-                filterJson = filterJsonForSubaddressMinor(fromSubaddressMinor),
-                ringLen = ringLen,
-                nodeUrl = nodeUrl,
-            )
+                    ),
+                    filterJson = filterJsonForSubaddressMinor(fromSubaddressMinor),
+                    ringLen = ringLen,
+                    nodeUrl = endpoint,
+                )
+            }
         }
         val res = SendJson.decodeSendResult(raw)
 
@@ -1295,12 +1326,14 @@ class WalletManager(
 
         return withContext(ioDispatcher) {
             applyProxyEnv(forBroadcast = true)
-            val raw = WalletCore.previewSweepJson(
-                walletId = walletId,
-                toAddress = toAddress,
-                ringLen = ringLen,
-                nodeUrl = nodeUrl,
-            )
+            val raw = withOptionalSiblingFeeRetry(nodeUrl) { endpoint ->
+                WalletCore.previewSweepJson(
+                    walletId = walletId,
+                    toAddress = toAddress,
+                    ringLen = ringLen,
+                    nodeUrl = endpoint,
+                )
+            }
             val res = SendJson.decodeSweepPreviewResult(raw)
 
             _state.value = _state.value.copy(
@@ -1323,13 +1356,15 @@ class WalletManager(
 
         return withContext(ioDispatcher) {
             applyProxyEnv(forBroadcast = true)
-            val raw = WalletCore.previewSweepJsonWithFilter(
-                walletId = walletId,
-                toAddress = toAddress,
-                filterJson = filterJsonForSubaddressMinor(fromSubaddressMinor),
-                ringLen = ringLen,
-                nodeUrl = nodeUrl,
-            )
+            val raw = withOptionalSiblingFeeRetry(nodeUrl) { endpoint ->
+                WalletCore.previewSweepJsonWithFilter(
+                    walletId = walletId,
+                    toAddress = toAddress,
+                    filterJson = filterJsonForSubaddressMinor(fromSubaddressMinor),
+                    ringLen = ringLen,
+                    nodeUrl = endpoint,
+                )
+            }
             val res = SendJson.decodeSweepPreviewResult(raw)
 
             _state.value = _state.value.copy(
@@ -1356,12 +1391,14 @@ class WalletManager(
 
         val raw = withContext(ioDispatcher) {
             applyProxyEnv(forBroadcast = true)
-            WalletCore.sweepJson(
-                walletId = walletId,
-                toAddress = toAddress,
-                ringLen = ringLen,
-                nodeUrl = nodeUrl,
-            )
+            withOptionalSiblingFeeRetry(nodeUrl) { endpoint ->
+                WalletCore.sweepJson(
+                    walletId = walletId,
+                    toAddress = toAddress,
+                    ringLen = ringLen,
+                    nodeUrl = endpoint,
+                )
+            }
         }
         val res = SendJson.decodeSweepSendResult(raw)
 
@@ -1393,13 +1430,15 @@ class WalletManager(
 
         val raw = withContext(ioDispatcher) {
             applyProxyEnv(forBroadcast = true)
-            WalletCore.sweepJsonWithFilter(
-                walletId = walletId,
-                toAddress = toAddress,
-                filterJson = filterJsonForSubaddressMinor(fromSubaddressMinor),
-                ringLen = ringLen,
-                nodeUrl = nodeUrl,
-            )
+            withOptionalSiblingFeeRetry(nodeUrl) { endpoint ->
+                WalletCore.sweepJsonWithFilter(
+                    walletId = walletId,
+                    toAddress = toAddress,
+                    filterJson = filterJsonForSubaddressMinor(fromSubaddressMinor),
+                    ringLen = ringLen,
+                    nodeUrl = endpoint,
+                )
+            }
         }
         val res = SendJson.decodeSweepSendResult(raw)
 
