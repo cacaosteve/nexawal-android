@@ -320,17 +320,37 @@ fun WalletCreationScreen(
 
             // Segmented control: Create vs Import
             SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+                val segmentColors = SegmentedButtonDefaults.colors(
+                    activeContainerColor = palette.cta,
+                    activeContentColor = palette.ctaText,
+                    activeBorderColor = palette.border,
+                    inactiveContainerColor = palette.card,
+                    inactiveContentColor = palette.primaryText,
+                    inactiveBorderColor = palette.border,
+                )
                 SegmentedButton(
                     selected = modeIndex.intValue == 0,
                     onClick = { modeIndex.intValue = 0 },
                     shape = SegmentedButtonDefaults.itemShape(index = 0, count = 2),
-                    label = { Text("Create new wallet (fast)") }
+                    colors = segmentColors,
+                    label = {
+                        Text(
+                            "Create new wallet (fast)",
+                            fontFamily = if (neon) FontFamily.Monospace else FontFamily.Default,
+                        )
+                    }
                 )
                 SegmentedButton(
                     selected = modeIndex.intValue == 1,
                     onClick = { modeIndex.intValue = 1 },
                     shape = SegmentedButtonDefaults.itemShape(index = 1, count = 2),
-                    label = { Text("Import existing wallet") }
+                    colors = segmentColors,
+                    label = {
+                        Text(
+                            "Import existing wallet",
+                            fontFamily = if (neon) FontFamily.Monospace else FontFamily.Default,
+                        )
+                    }
                 )
             }
 
