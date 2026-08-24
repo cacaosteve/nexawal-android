@@ -392,6 +392,23 @@ Java_com_nexatrode_nexawal_walletcore_WalletCoreJni_refreshCancel(
 }
 
 // Kotlin/Java signature:
+//   internal object WalletCoreJni { external fun refreshJobStatusJson(walletId: String): String }
+JNIEXPORT jstring JNICALL
+Java_com_nexatrode_nexawal_walletcore_WalletCoreJni_refreshJobStatusJson(
+    JNIEnv* env,
+    jclass /*clazz*/,
+    jstring walletId
+) {
+    const std::string wid = jstring_to_std_string(env, walletId);
+    char* status = wallet_refresh_job_status_json(wid.c_str());
+    if (status == nullptr) {
+        throw_walletcore_exception(env, "wallet_refresh_job_status_json", -1);
+        return nullptr;
+    }
+    return cstr_to_jstring_and_free(env, status);
+}
+
+// Kotlin/Java signature:
 //   internal object WalletCoreJni { external fun syncStatus(walletId: String): LongArray }
 // Returns: long[5] = [chainHeight, chainTime, lastRefreshTimestamp, lastScanned, restoreHeight]
 JNIEXPORT jlongArray JNICALL

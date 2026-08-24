@@ -1883,6 +1883,8 @@ private fun SendScreen(walletManager: WalletManager, palette: NexaPalette) {
     var toAddress by remember { mutableStateOf("") }
     var amountXmrText by remember { mutableStateOf("") }
     var amountInputMode by remember { mutableStateOf(AmountInputMode.XMR) }
+    var paymentDescription by remember { mutableStateOf("") }
+    var paymentRecipientName by remember { mutableStateOf("") }
     var isEstimating by remember { mutableStateOf(false) }
     var isSending by remember { mutableStateOf(false) }
     var isPreviewingMax by remember { mutableStateOf(false) }
@@ -1916,7 +1918,12 @@ private fun SendScreen(walletManager: WalletManager, palette: NexaPalette) {
     val invalidQrText = stringResource(R.string.error_invalid_qr)
 
     fun amountPiconeroOrNull(): Long? = AmountUnitParsing.piconero(amountXmrText, amountInputMode, fiatRate)
-    fun canPreviewFee(): Boolean = hasWallet && toAddress.trim().isNotEmpty() && amountPiconeroOrNull() != null && !isEstimating && !isSending
+    fun canPreviewFee(): Boolean = hasWallet &&
+        !state.refreshInProgress &&
+        toAddress.trim().isNotEmpty() &&
+        amountPiconeroOrNull() != null &&
+        !isEstimating &&
+        !isSending
     fun hasUnlockedForExactSend(): Boolean {
         val amount = amountPiconeroOrNull() ?: return false
         val fee = estimatedFee?.fee ?: return false
@@ -1927,7 +1934,11 @@ private fun SendScreen(walletManager: WalletManager, palette: NexaPalette) {
         )
     }
     fun canSendExact(): Boolean = canPreviewFee() && estimatedFee != null && hasUnlockedForExactSend()
-    fun canSendMax(): Boolean = hasWallet && toAddress.trim().isNotEmpty() && !isEstimating && !isSending
+    fun canSendMax(): Boolean = hasWallet &&
+        !state.refreshInProgress &&
+        toAddress.trim().isNotEmpty() &&
+        !isEstimating &&
+        !isSending
     fun totalWithFeeText(): String? {
         val fee = estimatedFee ?: return null
         val amount = amountPiconeroOrNull() ?: return null
@@ -1950,8 +1961,27 @@ private fun SendScreen(walletManager: WalletManager, palette: NexaPalette) {
         Text(stringResource(R.string.to_address), color = palette.primaryText)
         OutlinedTextField(
             value = toAddress,
-            onValueChange = {
-                toAddress = it
+            onValueChange = { input ->
+                val parsed = MoneroPaymentUri.parse(input)
+                    ?.takeIf { MoneroPaymentUri.hasCompleteAddressShape(it.address) }
+                if (parsed != null) {
+                    toAddress = parsed.address
+                    parsed.amountXmr
+                        ?.let(XmrAmount::parsePiconero)
+                        ?.let { pico ->
+                            AmountUnitParsing.setXmrPiconero(
+                                pico,
+                                { amountXmrText = it },
+                                { amountInputMode = it },
+                            )
+                        }
+                    paymentDescription = parsed.description.orEmpty()
+                    paymentRecipientName = parsed.recipientName.orEmpty()
+                } else {
+                    toAddress = input
+                    paymentDescription = ""
+                    paymentRecipientName = ""
+                }
                 estimatedFee = null
                 sweepPreview = null
                 sendResult = null
@@ -2001,6 +2031,21 @@ private fun SendScreen(walletManager: WalletManager, palette: NexaPalette) {
                 .fillMaxWidth()
                 .padding(bottom = 8.dp),
         )
+
+        if (paymentRecipientName.isNotEmpty() || paymentDescription.isNotEmpty()) {
+            SectionLabel(stringResource(R.string.payment_uri_label), palette)
+            Spacer(Modifier.height(6.dp))
+            if (paymentRecipientName.isNotEmpty()) {
+                Text(stringResource(R.string.section_recipient), color = palette.secondaryText)
+                Text(paymentRecipientName, color = palette.primaryText)
+                Spacer(Modifier.height(6.dp))
+            }
+            if (paymentDescription.isNotEmpty()) {
+                Text(stringResource(R.string.description_label), color = palette.secondaryText)
+                Text(paymentDescription, color = palette.primaryText)
+                Spacer(Modifier.height(8.dp))
+            }
+        }
 
         val mergedError = errorText ?: state.lastError
         if (mergedError != null) {
@@ -2337,10 +2382,7 @@ private fun SendScreen(walletManager: WalletManager, palette: NexaPalette) {
     }
 
     fun looksLikeAddress(addr: String): Boolean {
-        val s = addr.trim()
-        if (s.isEmpty()) return false
-        val first = s.first()
-        return first == '4' || first == '8' || first == '5'
+        return MoneroPaymentUri.hasCompleteAddressShape(addr)
     }
 
     fun parseMoneroUri(uri: String) {
@@ -2360,6 +2402,8 @@ private fun SendScreen(walletManager: WalletManager, palette: NexaPalette) {
         if (pico != null) {
             AmountUnitParsing.setXmrPiconero(pico, { amountXmrText = it }, { amountInputMode = it })
         }
+        paymentDescription = parsed.description.orEmpty()
+        paymentRecipientName = parsed.recipientName.orEmpty()
         infoText = paymentFromQrText
     }
 
@@ -2370,6 +2414,8 @@ private fun SendScreen(walletManager: WalletManager, palette: NexaPalette) {
             parseMoneroUri(trimmed)
         } else if (looksLikeAddress(trimmed)) {
             toAddress = trimmed
+            paymentDescription = ""
+            paymentRecipientName = ""
             infoText = addressFromQrText
         } else {
             errorText = invalidQrText

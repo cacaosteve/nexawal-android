@@ -4,6 +4,7 @@ import android.util.Log
 
 import android.content.Context
 import com.nexatrode.nexawal.logic.BalanceSnapshotPolicy
+import com.nexatrode.nexawal.logic.CacheFileIO
 import com.nexatrode.nexawal.logic.NetworkRouting
 import com.nexatrode.nexawal.logic.ScanRecoveryPolicy
 import com.nexatrode.nexawal.logic.SendGate
@@ -192,6 +193,7 @@ class WalletManager(
     private var catchUpJob: Job? = null
     private val refreshCancelRequested = AtomicBoolean(false)
     private val refreshInProgress = AtomicBoolean(false)
+    private val cachePersistenceSuppressed = AtomicBoolean(false)
     private val sendGate = SendGate()
 
     // Cache export throttling:
@@ -459,8 +461,7 @@ class WalletManager(
         setNodeUrl(newNodeUrl)
         if (_state.value.walletId.isNullOrBlank()) return
         if (refreshInProgress.get() || refreshJob?.isActive == true) {
-            cancelRefresh()
-            delay(400L)
+            cancelRefreshAndWait()
         }
         refreshWallet()
     }
@@ -475,8 +476,7 @@ class WalletManager(
     fun rescanFromHeightInBackground(fromHeight: Long): Job = scope.launch {
         runCatching {
             if (refreshInProgress.get() || refreshJob?.isActive == true) {
-                cancelRefresh()
-                delay(400L)
+                cancelRefreshAndWait()
             }
             rescanFromHeight(fromHeight)
         }.onFailure { t ->
@@ -642,6 +642,7 @@ class WalletManager(
         MoneroConfig.setTrustedScannedHeight(appContext, 0L)
         MoneroConfig.setScanInterrupted(appContext, true)
         didRewindEmptyHistory = false
+        cachePersistenceSuppressed.set(false)
 
         withContext(ioDispatcher) {
             WalletCore.openFromMnemonic(
@@ -686,16 +687,18 @@ class WalletManager(
 
         // Persist metadata for auto-load on next launch.
         if (persist) {
-            persistMetadata(
-                StoredWalletMetadata(
-                    walletId = walletId,
-                    mnemonic = mnemonic.trim(),
-                    restoreHeight = restoreHeight,
-                    mainnet = mainnet,
-                    nodeUrl = normalizedNodeUrl,
-                    savedAtMs = System.currentTimeMillis(),
+            withContext(ioDispatcher) {
+                persistMetadata(
+                    StoredWalletMetadata(
+                        walletId = walletId,
+                        mnemonic = mnemonic.trim(),
+                        restoreHeight = restoreHeight,
+                        mainnet = mainnet,
+                        nodeUrl = normalizedNodeUrl,
+                        savedAtMs = System.currentTimeMillis(),
+                    )
                 )
-            )
+            }
         }
 
         // Start sync on the manager-owned scope BEFORE publishing walletId (which swaps the UI).
@@ -866,6 +869,13 @@ class WalletManager(
                         "Refresh tuning applied: gapLimit=$gapLimit accountGap=$accountGap walletCoreScanDefaults=range/75/75 scanLog=0"
                     )
 
+                    // A previous Kotlin waiter can finish before its native worker observes
+                    // cancellation. Join that worker instead of racing a new async start.
+                    if (WalletCore.refreshJobStatus(walletId).state == WalletCore.RefreshJobState.RUNNING) {
+                        Log.i("WalletManager", "Waiting for previous native refresh worker walletId=$walletId")
+                        waitForNativeRefreshStopped(walletId)
+                    }
+
                     // Mirror iOS: start async refresh in the core, then poll `syncStatus` until completion.
                     // This avoids blocking indefinitely inside a single JNI call (sync refresh can hang).
                     Log.i("WalletManager", "ASYNC_REFRESH_PATH_ACTIVE: calling wallet_refresh_async walletId=$walletId nodeUrl=$nodeUrl (gapLimit=$gapLimit accountGap=$accountGap)")
@@ -928,25 +938,29 @@ class WalletManager(
                     allowAuthoritativeZero = !emptyHistoryAtTip,
                 )
             } catch (ce: CancellationException) {
-                // Kotlin-side cancellation (we still request core cancel in cancelRefresh()).
+                // A coordinated cancellation remains visibly active until cancelRefreshAndWait()
+                // observes that the native worker is terminal. Exporting or advertising idle here
+                // would race the native scanner's final checkpoint.
                 val st = withContext(ioDispatcher) {
                     runCatching { WalletCore.syncStatus(walletId) }.getOrNull()
                 }
                 if (st != null) {
                     _state.value = _state.value.copy(syncStatus = st)
                 }
-                withContext(ioDispatcher) {
-                    exportCacheAndPersist(walletId)
+                if (!refreshCancelRequested.get()) {
+                    withContext(ioDispatcher) {
+                        exportCacheAndPersist(walletId)
+                    }
+                    _state.value = _state.value.copy(
+                        refreshInProgress = false,
+                        refreshStartedAtMs = null,
+                        refreshLastProgressAtMs = null,
+                        syncStalled = false,
+                        refreshTargetHeight = null,
+                        gapLimit = null,
+                        accountGap = null,
+                    )
                 }
-                _state.value = _state.value.copy(
-                    refreshInProgress = false,
-                    refreshStartedAtMs = null,
-                    refreshLastProgressAtMs = null,
-                    syncStalled = false,
-                    refreshTargetHeight = null,
-                    gapLimit = null,
-                    accountGap = null,
-                )
             } catch (t: Throwable) {
                 // Best-effort: persist progress even on failure.
                 withContext(ioDispatcher) {
@@ -967,8 +981,10 @@ class WalletManager(
                     accountGap = null,
                 )
             } finally {
-                refreshInProgress.set(false)
-                stopSyncForegroundService()
+                if (!refreshCancelRequested.get()) {
+                    refreshInProgress.set(false)
+                    stopSyncForegroundService()
+                }
             }
         }
 
@@ -1049,6 +1065,7 @@ class WalletManager(
         lastExportCacheHash = null
         lastExportCacheLen = null
         lastExportAtMs = 0L
+        cachePersistenceSuppressed.set(false)
         didRewindEmptyHistory = false
 
         _state.value = _state.value.copy(
@@ -1079,6 +1096,8 @@ class WalletManager(
     suspend fun clearScanCache() {
         val walletId = _state.value.walletId ?: throw IllegalStateException(appContext.getString(R.string.no_wallet_open))
 
+        cancelRefreshAndWait()
+
         withContext(ioDispatcher) {
             val cache = cacheFile(walletId, mainnet = true)
             if (cache.exists()) {
@@ -1089,6 +1108,7 @@ class WalletManager(
         lastExportCacheHash = null
         lastExportCacheLen = null
         lastExportAtMs = 0L
+        cachePersistenceSuppressed.set(true)
 
         _state.value = _state.value.copy(
             cacheInfo = null,
@@ -1102,41 +1122,73 @@ class WalletManager(
      * This:
      * - sets an app-side flag
      * - calls walletcore refreshCancel (best-effort)
-     * - cancels the polling job so UI returns immediately
-     * - exports cache best-effort
+     * - keeps polling until WalletCore reports a terminal state
+     * - exports cache only after the native refresh has stopped
      */
     fun cancelRefresh() {
+        scope.launch { cancelRefreshAndWait() }
+    }
+
+    private suspend fun cancelRefreshAndWait() {
         val walletId = _state.value.walletId ?: return
-        if (!refreshInProgress.get()) return
+        val nativeJob = withContext(ioDispatcher) {
+            runCatching { WalletCore.refreshJobStatus(walletId) }.getOrNull()
+        }
+        if (!refreshInProgress.get() && nativeJob?.state != WalletCore.RefreshJobState.RUNNING) return
 
         // Keep interrupted=true so a cancelled/partial cache is never treated as a clean sync.
         // (Previously this cleared the flag, which made "WALLET SYNCED" + incomplete history common.)
         MoneroConfig.setScanInterrupted(appContext, true)
         refreshCancelRequested.set(true)
 
-        scope.launch {
-            withContext(ioDispatcher) {
-                runCatching {
-                    WalletCore.refreshCancel(walletId)
-                }.onFailure { t ->
-                    // Don't block cancellation on this.
-                    _state.value = _state.value.copy(lastError = appContext.getString(R.string.refresh_cancel_failed_fmt, t.message ?: t.javaClass.simpleName))
-                }
-                exportCacheAndPersist(walletId)
+        withContext(ioDispatcher) {
+            runCatching {
+                WalletCore.refreshCancel(walletId)
+            }.onFailure { t ->
+                _state.value = _state.value.copy(lastError = appContext.getString(R.string.refresh_cancel_failed_fmt, t.message ?: t.javaClass.simpleName))
             }
         }
 
-        refreshJob?.cancel()
+        runCatching { waitForNativeRefreshStopped(walletId) }
+            .onFailure { t ->
+                _state.value = _state.value.copy(lastError = t.message ?: t.javaClass.simpleName)
+            }
+        withContext(ioDispatcher) { exportCacheAndPersist(walletId) }
+
         refreshInProgress.set(false)
         stopSyncForegroundService()
 
         _state.value = _state.value.copy(
             refreshInProgress = false,
+            refreshStartedAtMs = null,
+            refreshLastProgressAtMs = null,
             syncStalled = false,
             refreshTargetHeight = null,
             gapLimit = null,
             accountGap = null,
         )
+    }
+
+    private suspend fun waitForNativeRefreshStopped(
+        walletId: String,
+        timeoutMs: Long = 20_000L,
+        pollIntervalMs: Long = 50L,
+    ): WalletCore.RefreshJobStatus {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (true) {
+            val status = withContext(ioDispatcher) { WalletCore.refreshJobStatus(walletId) }
+            when (status.state) {
+                WalletCore.RefreshJobState.IDLE -> return status
+                WalletCore.RefreshJobState.FAILED -> throw IOException(
+                    status.error ?: "Native refresh failed without an error message"
+                )
+                WalletCore.RefreshJobState.RUNNING -> Unit
+            }
+            if (System.currentTimeMillis() >= deadline) {
+                throw IOException("Timed out waiting for the native refresh worker to stop")
+            }
+            delay(pollIntervalMs.coerceAtLeast(10L))
+        }
     }
 
     /**
@@ -1899,10 +1951,6 @@ class WalletManager(
         val persistIntervalMs = 120_000L
         val persistBlockDelta = 1_000L
 
-        // Mirror iOS: sample core error state periodically even if progress is happening.
-        var lastCoreErrSampleAtMs = 0L
-        val coreErrSampleIntervalMs = 10_000L
-
         // Mirror iOS: log progress periodically and push syncStatus into state at a UI-safe cadence.
         // Updating Compose state every 200ms during a 100k+ block refresh can trip emulator ANRs.
         var lastProgressLogAtMs = 0L
@@ -1920,9 +1968,15 @@ class WalletManager(
                 throw CancellationException("refresh cancelled")
             }
 
+            val nativeJob = WalletCore.refreshJobStatus(walletId)
+            if (nativeJob.state == WalletCore.RefreshJobState.FAILED) {
+                exportCacheAndPersist(walletId)
+                throw IOException(
+                    nativeJob.error ?: "Native refresh failed without an error message"
+                )
+            }
             val st = WalletCore.syncStatus(walletId)
 
-            // Mirror iOS: sample core error state even if progress continues.
             val nowMs = System.currentTimeMillis()
 
             // Capture the initial target chain height once (so we don't chase a moving tip).
@@ -1941,18 +1995,6 @@ class WalletManager(
                 lastRateSampleAtMs = nowMs
                 lastRateSampleScanned = st.lastScanned
             }
-            if (nowMs - lastCoreErrSampleAtMs >= coreErrSampleIntervalMs) {
-                lastCoreErrSampleAtMs = nowMs
-                val coreErr = runCatching { WalletCore.lastErrorMessage() }.getOrNull()
-                if (!coreErr.isNullOrBlank()) {
-                    Log.w("WalletManager", "Core error sample during refresh: $coreErr")
-                    if (isTerminalRefreshCoreError(coreErr)) {
-                        exportCacheAndPersist(walletId)
-                        throw IOException(coreErr)
-                    }
-                }
-            }
-
             // Mirror iOS: periodic progress logging (blocks remaining + rough blocks/sec).
             if (nowMs - lastProgressLogAtMs >= progressLogIntervalMs) {
                 lastProgressLogAtMs = nowMs
@@ -2027,9 +2069,23 @@ class WalletManager(
             // Only evaluate completion once we have captured a stable target height.
             targetHeight?.let { target ->
                 val effectiveTarget = maxOf(target, st.restoreHeight)
-                if (effectiveTarget > 0 && st.lastScanned >= effectiveTarget) {
+                if (effectiveTarget > 0 &&
+                    st.lastScanned >= effectiveTarget &&
+                    nativeJob.state == WalletCore.RefreshJobState.IDLE
+                ) {
                     return@withContext st
                 }
+            }
+
+            if (nativeJob.state == WalletCore.RefreshJobState.IDLE &&
+                targetHeight != null &&
+                st.lastScanned < maxOf(targetHeight!!, st.restoreHeight)
+            ) {
+                exportCacheAndPersist(walletId)
+                throw IOException(
+                    "Native refresh stopped before reaching its target " +
+                        "(lastScanned=${st.lastScanned}, target=$targetHeight)"
+                )
             }
 
             // Stall detection:
@@ -2052,24 +2108,17 @@ class WalletManager(
             }
 
             if (tip != null && remaining != null && remaining > 0 && stalledForMs > hardStallTimeoutMs) {
-                val coreErr = runCatching { WalletCore.lastErrorMessage() }.getOrNull()
-
                 Log.e(
                     "WalletManager",
                     "STALL: refresh appears stuck (>${hardStallTimeoutMs}ms); keeping WalletCore scan profile unchanged " +
                         "walletId=$walletId " +
                         "lastScanned=${st.lastScanned} restoreHeight=${st.restoreHeight} chainHeight=${st.chainHeight} " +
-                        "target=$tip remaining=$remaining lastError=${coreErr ?: "<null>"}"
+                        "target=$tip remaining=$remaining nativeJob=${nativeJob.state}"
                 )
-
-                if (!coreErr.isNullOrBlank()) {
-                    Log.w("WalletManager", "Core lastErrorMessage (stall): $coreErr")
-                }
 
                 exportCacheAndPersist(walletId)
                 throw RefreshStalledException(
-                    "Refresh stalled (>${hardStallTimeoutMs}ms) lastScanned=${st.lastScanned} chainHeight=${st.chainHeight}" +
-                        (if (!coreErr.isNullOrBlank()) " coreErr=$coreErr" else "")
+                    "Refresh stalled (>${hardStallTimeoutMs}ms) lastScanned=${st.lastScanned} chainHeight=${st.chainHeight}"
                 )
             }
 
@@ -2104,7 +2153,10 @@ class WalletManager(
         val f = preparedFile(walletId, mainnet = true)
         ensureCacheDirExists(f)
         val envelope = SendJson.PendingPreparedEnvelope(nodeUrl = nodeUrl, prepared = prepared)
-        f.writeText(SendJson.encodePendingPreparedEnvelope(envelope))
+        CacheFileIO.writeAtomically(
+            f,
+            SendJson.encodePendingPreparedEnvelope(envelope).toByteArray(Charsets.UTF_8),
+        )
         Log.i("WalletManager", "Persisted prepared send txid=${prepared.txid} to ${f.name}")
     }
 
@@ -2227,13 +2279,24 @@ class WalletManager(
 
         if (!f.exists()) return
 
-        val bytes = runCatching { f.readBytes() }.getOrNull()
-        if (bytes == null) {
-            Log.w("WalletManager", "CACHE_IMPORT failed to read bytes walletId=$walletId file=${f.absolutePath}")
+        val bytes = runCatching { f.readBytes() }.getOrElse { error ->
+            val quarantined = quarantineRejectedCache(
+                file = f,
+                walletId = walletId,
+                reason = "read failed: ${error.message ?: error.javaClass.simpleName}",
+            )
+            Log.w(
+                "WalletManager",
+                "CACHE_IMPORT failed to read bytes walletId=$walletId file=${f.absolutePath} quarantined=${quarantined?.absolutePath}",
+            )
             return
         }
         if (bytes.isEmpty()) {
-            Log.w("WalletManager", "CACHE_IMPORT empty cache file walletId=$walletId file=${f.absolutePath}")
+            val quarantined = quarantineRejectedCache(f, walletId, "empty cache")
+            Log.w(
+                "WalletManager",
+                "CACHE_IMPORT empty cache file walletId=$walletId file=${f.absolutePath} quarantined=${quarantined?.absolutePath}",
+            )
             return
         }
 
@@ -2242,7 +2305,11 @@ class WalletManager(
         }.onFailure { t ->
             // Best-effort only: don't fail opening wallet due to bad cache.
             val msg = "cache import failed: ${t.message ?: t.javaClass.simpleName}"
-            Log.w("WalletManager", "CACHE_IMPORT error walletId=$walletId bytes=${bytes.size} err=$msg")
+            val quarantined = quarantineRejectedCache(f, walletId, msg)
+            Log.w(
+                "WalletManager",
+                "CACHE_IMPORT error walletId=$walletId bytes=${bytes.size} err=$msg quarantined=${quarantined?.absolutePath}",
+            )
             _state.value = _state.value.copy(lastError = appContext.getString(R.string.cache_import_failed_fmt, t.message ?: t.javaClass.simpleName))
             return
         }
@@ -2263,6 +2330,10 @@ class WalletManager(
     }
 
     private fun exportCacheAndPersist(walletId: String) {
+        if (cachePersistenceSuppressed.get()) {
+            Log.i("WalletManager", "CACHE_EXPORT suppressed after explicit clear walletId=$walletId")
+            return
+        }
         val stBefore = runCatching { WalletCore.syncStatus(walletId) }.getOrNull()
         val cache = runCatching { WalletCore.exportCache(walletId) }.getOrNull()
         if (cache == null) {
@@ -2295,7 +2366,7 @@ class WalletManager(
         val f = cacheFile(walletId, mainnet = true)
         runCatching {
             ensureCacheDirExists(f)
-            f.writeBytes(cache)
+            CacheFileIO.writeAtomically(f, cache)
 
             lastExportCacheHash = hash
             lastExportCacheLen = len
@@ -2319,6 +2390,26 @@ class WalletManager(
             Log.w("WalletManager", "CACHE_EXPORT error walletId=$walletId file=${f.absolutePath} bytes=${cache.size} err=$msg")
             _state.value = _state.value.copy(lastError = appContext.getString(R.string.cache_export_failed_fmt, t.message ?: t.javaClass.simpleName))
         }
+    }
+
+    private fun quarantineRejectedCache(file: File, walletId: String, reason: String): File? {
+        return runCatching { CacheFileIO.quarantineRejected(file) }
+            .onSuccess { quarantined ->
+                if (quarantined != null) {
+                    _state.value = _state.value.copy(cacheInfo = null)
+                    Log.w(
+                        "WalletManager",
+                        "CACHE_QUARANTINE walletId=$walletId reason=$reason movedTo=${quarantined.absolutePath}",
+                    )
+                }
+            }
+            .onFailure { error ->
+                Log.w(
+                    "WalletManager",
+                    "CACHE_QUARANTINE failed walletId=$walletId reason=$reason file=${file.absolutePath} err=${error.message ?: error.javaClass.simpleName}",
+                )
+            }
+            .getOrNull()
     }
 
     /**
@@ -2472,25 +2563,23 @@ class WalletManager(
     }
 
     private fun persistMetadata(meta: StoredWalletMetadata) {
-        // Keep this synchronous and best-effort (caller is already in a safe context).
-        runCatching {
-            val f = metadataFile()
-            ensureParentDirExists(f)
-            val encrypted = MnemonicCipher.encrypt(meta.mnemonic)
-            val json = JSONObject()
-                .put("walletId", meta.walletId)
-                .put("encryptedMnemonic", encrypted.ciphertextBase64)
-                .put("mnemonicIv", encrypted.ivBase64)
-                .put("restoreHeight", meta.restoreHeight)
-                .put("mainnet", meta.mainnet)
-                .put("nodeUrl", meta.nodeUrl)
-                .put("savedAtMs", meta.savedAtMs)
-                .put("formatVersion", 2)
-            f.writeText(json.toString(2))
-            _state.value = _state.value.copy(lastPersistedAtMs = System.currentTimeMillis(), hasStoredWallet = true)
-        }.onFailure { t ->
-            _state.value = _state.value.copy(lastError = appContext.getString(R.string.failed_persist_metadata_fmt, t.message ?: t.javaClass.simpleName))
-        }
+        val f = metadataFile()
+        ensureParentDirExists(f)
+        val encrypted = MnemonicCipher.encrypt(meta.mnemonic)
+        val json = JSONObject()
+            .put("walletId", meta.walletId)
+            .put("encryptedMnemonic", encrypted.ciphertextBase64)
+            .put("mnemonicIv", encrypted.ivBase64)
+            .put("restoreHeight", meta.restoreHeight)
+            .put("mainnet", meta.mainnet)
+            .put("nodeUrl", meta.nodeUrl)
+            .put("savedAtMs", meta.savedAtMs)
+            .put("formatVersion", 2)
+        CacheFileIO.writeAtomically(f, json.toString(2).toByteArray(Charsets.UTF_8))
+        _state.value = _state.value.copy(
+            lastPersistedAtMs = System.currentTimeMillis(),
+            hasStoredWallet = true,
+        )
     }
 
     private fun readMetadata(): StoredWalletMetadata {

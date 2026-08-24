@@ -1,5 +1,9 @@
 package com.nexatrode.nexawal.walletcore
 
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import java.math.BigDecimal
 import java.math.RoundingMode
 
@@ -219,6 +223,36 @@ object WalletCore {
     fun refreshCancel(walletId: String) {
         require(walletId.isNotBlank()) { "walletId must not be blank" }
         WalletCoreJni.refreshCancel(walletId)
+    }
+
+    enum class RefreshJobState {
+        IDLE,
+        RUNNING,
+        FAILED,
+    }
+
+    data class RefreshJobStatus(
+        val state: RefreshJobState,
+        val error: String?,
+    )
+
+    /** Authoritative per-wallet native worker state; failure text persists until the next start. */
+    @JvmStatic
+    fun refreshJobStatus(walletId: String): RefreshJobStatus {
+        require(walletId.isNotBlank()) { "walletId must not be blank" }
+        val objectValue = Json.parseToJsonElement(
+            WalletCoreJni.refreshJobStatusJson(walletId)
+        ).jsonObject
+        val state = when (objectValue.getValue("state").jsonPrimitive.content) {
+            "idle" -> RefreshJobState.IDLE
+            "running" -> RefreshJobState.RUNNING
+            "failed" -> RefreshJobState.FAILED
+            else -> error("wallet_refresh_job_status_json returned an unknown state")
+        }
+        return RefreshJobStatus(
+            state = state,
+            error = objectValue["error"]?.jsonPrimitive?.contentOrNull,
+        )
     }
 
     /**
@@ -610,6 +644,8 @@ internal object WalletCoreJni {
     external fun refresh(walletId: String, nodeUrl: String?): Long
 
     external fun refreshCancel(walletId: String)
+
+    external fun refreshJobStatusJson(walletId: String): String
 
     /**
      * Returns: long[5] = [chainHeight, chainTime, lastRefreshTimestamp, lastScanned, restoreHeight]

@@ -180,6 +180,9 @@ int32_t wallet_refresh_async(
     const char* node_url
 );
 
+/* Returned string must be released with walletcore_free_cstr. */
+char* wallet_refresh_job_status_json(const char* wallet_id);
+
 /*
  * Request cancellation of the in-flight refresh for a specific wallet.
  *

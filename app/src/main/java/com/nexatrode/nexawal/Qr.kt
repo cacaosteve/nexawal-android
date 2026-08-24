@@ -7,7 +7,7 @@ import com.google.zxing.EncodeHintType
 import com.google.zxing.MultiFormatWriter
 import com.google.zxing.common.BitMatrix
 import com.google.zxing.qrcode.decoder.ErrorCorrectionLevel
-import java.net.URLEncoder
+import com.nexatrode.nexawal.logic.MoneroPaymentUri
 
 /**
  * QR code + Monero URI utilities.
@@ -40,32 +40,11 @@ object MoneroQr {
         address: String,
         amountXmr: String? = null,
         description: String? = null,
-    ): String {
-        val addr = address.trim()
-        require(addr.isNotEmpty()) { "address must not be empty" }
-
-        val params = buildList {
-            val amt = amountXmr?.trim().orEmpty()
-            if (amt.isNotEmpty()) {
-                // Do not attempt to normalize numeric formatting here; the caller should provide a wallet-friendly value.
-                add("tx_amount=${urlEncode(amt)}")
-            }
-
-            val desc = description?.trim().orEmpty()
-            if (desc.isNotEmpty()) {
-                add("tx_description=${urlEncode(desc)}")
-            }
-        }
-
-        return if (params.isEmpty()) {
-            "monero:$addr"
-        } else {
-            "monero:$addr?${params.joinToString("&")}"
-        }
-    }
-
-    private fun urlEncode(value: String): String =
-        URLEncoder.encode(value, Charsets.UTF_8.name())
+    ): String = MoneroPaymentUri.build(
+        address = address,
+        amountXmr = amountXmr,
+        description = description,
+    )
 
     /**
      * Generate a QR code bitmap for the given content string.
