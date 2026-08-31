@@ -11,6 +11,19 @@ import org.junit.Test
 
 class CacheFileIOTest {
     @Test
+    fun textLoadDistinguishesMissingValidAndUnreadableFiles() = withTempDirectory { directory ->
+        val journal = directory.resolve("pending.json")
+        assertEquals(null, CacheFileIO.readTextIfPresent(journal))
+
+        journal.writeText("signed transaction")
+        assertEquals("signed transaction", CacheFileIO.readTextIfPresent(journal))
+
+        journal.delete()
+        journal.mkdir()
+        assertTrue(runCatching { CacheFileIO.readTextIfPresent(journal) }.isFailure)
+    }
+
+    @Test
     fun atomicReplacementPublishesOnlyTheCompleteNewCache() = withTempDirectory { directory ->
         val cache = directory.resolve("main_wallet.cache")
         CacheFileIO.writeAtomically(cache, "first complete cache".toByteArray())

@@ -5,6 +5,7 @@ import android.util.Log
 import android.content.Context
 import com.nexatrode.nexawal.logic.BalanceSnapshotPolicy
 import com.nexatrode.nexawal.logic.CacheFileIO
+import com.nexatrode.nexawal.logic.LastKnownGoodPolicy
 import com.nexatrode.nexawal.logic.NetworkRouting
 import com.nexatrode.nexawal.logic.ScanRecoveryPolicy
 import com.nexatrode.nexawal.logic.SendGate
@@ -1304,18 +1305,34 @@ class WalletManager(
             runCatching { WalletCore.listTransfersJson(walletId) }.getOrNull()
         }
         if (json != null) {
-            val (parsed, parseErr) = parseTransfersJson(json)
-            _state.value = _state.value.copy(
-                transfersJson = json,
-                transfers = parsed,
-                transfersParseError = parseErr,
-                lastTransfersRefreshAtMs = System.currentTimeMillis(),
+            val previous = _state.value
+            val decision = LastKnownGoodPolicy.choose(
+                previous.transfers,
+                runCatching { parseTransfersJson(json) },
             )
-            fiatPrices.recordSeenTransfers(
-                parsed.map { FiatSeenTransfer(txid = it.txid, timestampSeconds = it.timestamp?.takeIf { ts -> ts > 0L }) },
-            )
-            if (parsed.isNotEmpty()) {
-                didRewindEmptyHistory = false
+            if (decision.accepted) {
+                val parsed = decision.value
+                _state.value = previous.copy(
+                    transfersJson = json,
+                    transfers = parsed,
+                    transfersParseError = null,
+                    lastTransfersRefreshAtMs = System.currentTimeMillis(),
+                )
+                fiatPrices.recordSeenTransfers(
+                    parsed.map { FiatSeenTransfer(txid = it.txid, timestampSeconds = it.timestamp?.takeIf { ts -> ts > 0L }) },
+                )
+                if (parsed.isNotEmpty()) {
+                    didRewindEmptyHistory = false
+                }
+            } else {
+                _state.value = previous.copy(
+                    transfersParseError = decision.errorMessage,
+                    lastTransfersRefreshAtMs = System.currentTimeMillis(),
+                )
+                Log.w(
+                    "WalletManager",
+                    "Keeping last-known-good transaction history after parse failure: ${decision.errorMessage}",
+                )
             }
         }
     }
@@ -1730,14 +1747,8 @@ class WalletManager(
         res
     }
 
-    private fun parseTransfersJson(json: String): Pair<List<Transfer>, String?> {
-        return try {
-            val parsed = transfersJsonParser.decodeFromString<List<Transfer>>(json)
-            parsed to null
-        } catch (t: Throwable) {
-            emptyList<Transfer>() to (t.message ?: t.javaClass.simpleName)
-        }
-    }
+    private fun parseTransfersJson(json: String): List<Transfer> =
+        transfersJsonParser.decodeFromString(json)
 
     private fun isTerminalRefreshCoreError(message: String): Boolean {
         val normalized = message.lowercase()
@@ -2170,12 +2181,16 @@ class WalletManager(
 
     private fun loadPendingPrepared(walletId: String): SendJson.PendingPreparedEnvelope? {
         val f = preparedFile(walletId, mainnet = true)
-        if (!f.exists()) return null
-        return runCatching {
-            SendJson.decodePendingPreparedEnvelope(f.readText())
-        }.onFailure { t ->
+        val raw = CacheFileIO.readTextIfPresent(f) ?: return null
+        return try {
+            SendJson.decodePendingPreparedEnvelope(raw)
+        } catch (t: Throwable) {
             Log.w("WalletManager", "Failed to decode prepared send file: ${t.message}")
-        }.getOrNull()
+            throw IllegalStateException(
+                "Pending send recovery data exists but cannot be decoded. New sends are blocked until it is recovered or removed: ${t.message ?: t.javaClass.simpleName}",
+                t,
+            )
+        }
     }
 
     private data class RecoveredPreparedSend(

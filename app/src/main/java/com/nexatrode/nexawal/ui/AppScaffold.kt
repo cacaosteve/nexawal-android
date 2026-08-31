@@ -124,6 +124,8 @@ import com.nexatrode.nexawal.logic.FiatEstimate
 import com.nexatrode.nexawal.logic.FiatRate
 import com.nexatrode.nexawal.logic.MoneroPaymentUri
 import com.nexatrode.nexawal.logic.NetworkRouting
+import com.nexatrode.nexawal.logic.SyncErrorKind
+import com.nexatrode.nexawal.logic.SyncErrorPolicy
 import com.nexatrode.nexawal.logic.XmrAmount
 import com.nexatrode.nexawal.WalletManager
 import com.nexatrode.nexawal.XmrFormat
@@ -976,14 +978,18 @@ private fun WalletScreen(
         SectionCard(palette = palette) {
             Column {
                 val hasNodeError = mergedError != null && !state.refreshInProgress && !isSynced
-                val isStallError = hasNodeError && isSyncStallError(state.syncStalled)
+                val syncErrorKind = mergedError
+                    ?.takeIf { hasNodeError }
+                    ?.let { SyncErrorPolicy.classify(it, stalled = isSyncStallError(state.syncStalled)) }
+                val isStallError = syncErrorKind == SyncErrorKind.STALLED
                 // Treat sync as effectively not-complete for display when a refresh error exists,
                 // so we never imply "synced" alongside an unreachable/failed node.
                 val isSyncedEffective = isSynced && mergedError == null
                 val showSyncProgress = !isSyncedEffective || state.refreshInProgress
                 val syncHeadlineRaw = when {
                     isStallError -> stringResource(R.string.sync_stalled)
-                    hasNodeError -> stringResource(R.string.sync_node_unreachable)
+                    syncErrorKind == SyncErrorKind.NODE_UNREACHABLE -> stringResource(R.string.sync_node_unreachable)
+                    syncErrorKind == SyncErrorKind.FAILED -> "Sync failed"
                     isSyncedEffective -> stringResource(R.string.sync_wallet_synced)
                     targetHeight == 0L -> stringResource(R.string.sync_connecting)
                     state.refreshInProgress && lastScanned == restoreHeight -> stringResource(R.string.sync_scanning)

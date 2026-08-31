@@ -10,6 +10,14 @@ import java.nio.file.StandardCopyOption
 
 /** Crash-safe persistence and recoverable quarantine for WalletCore cache blobs. */
 object CacheFileIO {
+    /** Returns null only when absent; an existing unreadable file is an error. */
+    @Throws(IOException::class)
+    fun readTextIfPresent(target: File): String? {
+        if (!target.exists()) return null
+        if (!target.isFile) throw IOException("not a regular file: ${target.absolutePath}")
+        return target.readText()
+    }
+
     @Throws(IOException::class)
     fun writeAtomically(target: File, bytes: ByteArray) {
         writeAtomically(target) { output -> output.write(bytes) }
