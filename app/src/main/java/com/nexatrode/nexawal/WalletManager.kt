@@ -205,11 +205,6 @@ class WalletManager(
     @Volatile private var lastExportAtMs: Long = 0L
     @Volatile private var didRewindEmptyHistory: Boolean = false
 
-    private val transfersJsonParser: Json = Json {
-        ignoreUnknownKeys = true
-        isLenient = true
-        explicitNulls = false
-    }
     private val receiveBookJson: Json = Json {
         ignoreUnknownKeys = true
         encodeDefaults = true
@@ -1308,7 +1303,7 @@ class WalletManager(
             val previous = _state.value
             val decision = LastKnownGoodPolicy.choose(
                 previous.transfers,
-                runCatching { parseTransfersJson(json) },
+                runCatching { TransferHistoryJson.decode(json, walletId).transfers },
             )
             if (decision.accepted) {
                 val parsed = decision.value
@@ -1746,9 +1741,6 @@ class WalletManager(
 
         res
     }
-
-    private fun parseTransfersJson(json: String): List<Transfer> =
-        transfersJsonParser.decodeFromString(json)
 
     private fun isTerminalRefreshCoreError(message: String): Boolean {
         val normalized = message.lowercase()

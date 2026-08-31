@@ -103,6 +103,8 @@ class WalletCoreSmokeTest {
 
         val transfersJson = WalletCore.listTransfersJson(walletId)
         assertTrue(transfersJson.isNotBlank())
+        val transferHistory = TransferHistoryJson.decode(transfersJson, walletId)
+        assertEquals(1, transferHistory.schemaVersion)
         println("SMOKE transfers json length: ${transfersJson.length}")
 
         if (!destinationAddress.isNullOrBlank()) {
