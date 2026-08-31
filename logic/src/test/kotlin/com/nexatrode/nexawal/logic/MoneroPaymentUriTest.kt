@@ -52,6 +52,22 @@ class MoneroPaymentUriTest {
     }
 
     @Test
+    fun equivalentAmountAliasesNormalize() {
+        val parsed = MoneroPaymentUri.parse("monero:$primary?amount=1.5&tx_amount=1.500")
+        assertEquals("1.5", parsed?.amountXmr)
+        assertEquals(
+            MoneroPaymentUri.parseAmountPiconero("1.5"),
+            MoneroPaymentUri.parseAmountPiconero("1.500"),
+        )
+    }
+
+    @Test
+    fun moreThanTwelveFractionalDigitsRejected() {
+        assertNull(MoneroPaymentUri.parseAmountPiconero("1.1234567890123"))
+        assertNull(MoneroPaymentUri.parse("monero:$primary?tx_amount=1.1234567890123"))
+    }
+
+    @Test
     fun spendAndViewKeysIgnoredAsSendTargets() {
         val uri = "monero:$primary?spend_key=deadbeefdeadbeef&view_key=cafebabecafebabe&tx_amount=1.0"
         val parsed = MoneroPaymentUri.parse(uri)

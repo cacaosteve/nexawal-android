@@ -29,6 +29,7 @@ data class MoneroPaymentUri(
             if (address.isEmpty()) return null
 
             var amountXmr: String? = null
+            var amountPiconero: Long? = null
             var description: String? = null
             var recipientName: String? = null
             if (!queryString.isNullOrEmpty()) {
@@ -41,11 +42,14 @@ data class MoneroPaymentUri(
                     }
                     if ((name == "amount" || name == "tx_amount") && rawValue.isNotEmpty()) {
                         val decoded = decode(rawValue, plusAsSpace = false)
-                        if (!isValidAmount(decoded)) return null
-                        when (val existing = amountXmr) {
-                            null -> amountXmr = decoded
-                            decoded -> Unit
-                            else -> return null // conflicting amounts
+                        val pico = parseAmountPiconero(decoded) ?: return null
+                        when (val existing = amountPiconero) {
+                            null -> {
+                                amountPiconero = pico
+                                amountXmr = decoded
+                            }
+                            pico -> Unit
+                            else -> return null
                         }
                     } else if ((name == "tx_description" || name == "message") &&
                         rawValue.isNotEmpty() && description == null
@@ -72,23 +76,32 @@ data class MoneroPaymentUri(
                 (address.startsWith('4') || address.startsWith('8'))
         }
 
-        /** Plain decimal XMR only; rejects signs, scientific notation, and junk. */
-        fun isValidAmount(value: String): Boolean {
+        /** Plain decimal XMR → piconero; max 12 fractional digits, checked Long range. */
+        fun parseAmountPiconero(value: String): Long? {
             val s = value.trim()
-            if (s.isEmpty() || s.startsWith('+') || s.startsWith('-')) return false
-            var seenDot = false
-            var digits = 0
-            for ((i, ch) in s.withIndex()) {
-                when {
-                    ch in '0'..'9' -> digits++
-                    ch == '.' && !seenDot -> {
-                        if (i == 0) return false
-                        seenDot = true
-                    }
-                    else -> return false
-                }
+            if (s.isEmpty() || s.startsWith('+') || s.startsWith('-')) return null
+            val parts = s.split('.', limit = 2)
+            val wholeS = parts[0]
+            val fracS = if (parts.size > 1) parts[1] else ""
+            if (wholeS.isEmpty() || wholeS.any { it !in '0'..'9' }) return null
+            if (fracS.length > 12 || fracS.any { it !in '0'..'9' }) return null
+            val whole = wholeS.toLongOrNull() ?: return null
+            var frac = if (fracS.isEmpty()) 0L else fracS.toLongOrNull() ?: return null
+            repeat(12 - fracS.length) {
+                val next = frac * 10
+                if (next / 10 != frac) return null
+                frac = next
             }
-            return digits > 0
+            val wholePico = try {
+                Math.multiplyExact(whole, 1_000_000_000_000L)
+            } catch (_: ArithmeticException) {
+                return null
+            }
+            return try {
+                Math.addExact(wholePico, frac)
+            } catch (_: ArithmeticException) {
+                null
+            }
         }
 
         fun build(
