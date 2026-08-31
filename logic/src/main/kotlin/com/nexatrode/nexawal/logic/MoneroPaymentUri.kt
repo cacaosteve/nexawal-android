@@ -39,8 +39,14 @@ data class MoneroPaymentUri(
                     if (name == "spend_key" || name == "view_key" || name == "spendkey" || name == "viewkey") {
                         continue
                     }
-                    if ((name == "amount" || name == "tx_amount") && rawValue.isNotEmpty() && amountXmr == null) {
-                        amountXmr = decode(rawValue, plusAsSpace = false)
+                    if ((name == "amount" || name == "tx_amount") && rawValue.isNotEmpty()) {
+                        val decoded = decode(rawValue, plusAsSpace = false)
+                        if (!isValidAmount(decoded)) return null
+                        when (val existing = amountXmr) {
+                            null -> amountXmr = decoded
+                            decoded -> Unit
+                            else -> return null // conflicting amounts
+                        }
                     } else if ((name == "tx_description" || name == "message") &&
                         rawValue.isNotEmpty() && description == null
                     ) {
@@ -64,6 +70,25 @@ data class MoneroPaymentUri(
             val address = raw.trim()
             return (address.length == 95 || address.length == 106) &&
                 (address.startsWith('4') || address.startsWith('8'))
+        }
+
+        /** Plain decimal XMR only; rejects signs, scientific notation, and junk. */
+        fun isValidAmount(value: String): Boolean {
+            val s = value.trim()
+            if (s.isEmpty() || s.startsWith('+') || s.startsWith('-')) return false
+            var seenDot = false
+            var digits = 0
+            for ((i, ch) in s.withIndex()) {
+                when {
+                    ch in '0'..'9' -> digits++
+                    ch == '.' && !seenDot -> {
+                        if (i == 0) return false
+                        seenDot = true
+                    }
+                    else -> return false
+                }
+            }
+            return digits > 0
         }
 
         fun build(

@@ -35,9 +35,20 @@ class MoneroPaymentUriTest {
     }
 
     @Test
-    fun plusIsNotRewrittenInAmount() {
-        val parsed = MoneroPaymentUri.parse("monero:$primary?tx_amount=%2B1.5")
-        assertEquals("+1.5", parsed?.amountXmr)
+    fun plusAmountIsRejected() {
+        assertNull(MoneroPaymentUri.parse("monero:$primary?tx_amount=%2B1.5"))
+        assertNull(MoneroPaymentUri.parse("monero:$primary?tx_amount=+1.5"))
+    }
+
+    @Test
+    fun conflictingAmountsAreRejected() {
+        assertNull(MoneroPaymentUri.parse("monero:$primary?amount=1.5&tx_amount=2.0"))
+    }
+
+    @Test
+    fun identicalAmountDuplicatesAreAccepted() {
+        val parsed = MoneroPaymentUri.parse("monero:$primary?amount=1.5&tx_amount=1.5")
+        assertEquals("1.5", parsed?.amountXmr)
     }
 
     @Test

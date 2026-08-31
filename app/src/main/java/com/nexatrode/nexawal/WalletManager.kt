@@ -798,10 +798,23 @@ class WalletManager(
             }
         }
 
-        // Extra guard: if a refresh is currently marked in progress, short-circuit.
-        // This protects against accidental double-starts due to UI recomposition or rapid taps.
+        // Extra guard: if a refresh is currently marked in progress, join it.
+        // Wait briefly for the starter to publish `refreshJob` so callers never observe
+        // "finished" during the flag-set → job-assign window.
         if (refreshInProgress.get()) {
-            Log.i("WalletManager", "Refresh already in progress (flag); skipping new start walletId=$walletId")
+            Log.i("WalletManager", "Refresh already in progress (flag); joining existing job walletId=$walletId")
+            val deadline = System.nanoTime() + 5_000_000_000L
+            while (refreshInProgress.get() &&
+                (refreshJob == null || refreshJob?.isActive != true) &&
+                System.nanoTime() < deadline
+            ) {
+                delay(10)
+            }
+            refreshJob?.let { job ->
+                if (job.isActive) {
+                    job.join()
+                }
+            }
             return _state.value.syncStatus ?: withContext(ioDispatcher) { WalletCore.syncStatus(walletId) }
         }
 
@@ -984,7 +997,7 @@ class WalletManager(
             }
         }
 
-        refreshJob = job
+        refreshJob = job // publish before join so concurrent callers can attach
         job.join()
 
         return _state.value.syncStatus ?: withContext(ioDispatcher) { WalletCore.syncStatus(walletId) }
