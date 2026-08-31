@@ -7,6 +7,7 @@ import com.nexatrode.nexawal.logic.BalanceSnapshotPolicy
 import com.nexatrode.nexawal.logic.CacheFileIO
 import com.nexatrode.nexawal.logic.LastKnownGoodPolicy
 import com.nexatrode.nexawal.logic.NetworkRouting
+import com.nexatrode.nexawal.logic.RefreshSingleFlight
 import com.nexatrode.nexawal.logic.ScanRecoveryPolicy
 import com.nexatrode.nexawal.logic.SendGate
 import com.nexatrode.nexawal.logic.SendSafety
@@ -24,8 +25,6 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
 import kotlinx.serialization.Serializable
@@ -196,8 +195,8 @@ class WalletManager(
     private var catchUpJob: Job? = null
     private val refreshCancelRequested = AtomicBoolean(false)
     private val refreshInProgress = AtomicBoolean(false)
-    /** Serializes refresh start so concurrent callers share one job (no check/set race). */
-    private val refreshStartMutex = Mutex()
+    /** Production single-flight gate (mutex + under-lock prepare); same type unit-tested in logic. */
+    private val refreshSingleFlight = RefreshSingleFlight()
     private val cachePersistenceSuppressed = AtomicBoolean(false)
     private val sendGate = SendGate()
 
@@ -791,44 +790,45 @@ class WalletManager(
                 Log.w("WalletManager", "Core lastErrorMessage (preflight) probe failed: ${t.message ?: t.javaClass.simpleName}")
             }
 
-        // Genuine single-flight: mutex + double-check so concurrent callers cannot both start.
-        // Join happens outside the lock so the refresh itself is not serialized behind waiters.
-        val jobToAwait = refreshStartMutex.withLock {
-            refreshJob?.takeIf { it.isActive }?.let { existing ->
-                Log.i("WalletManager", "Refresh already in progress; joining existing job walletId=$walletId")
-                return@withLock existing
-            }
+        // Production single-flight gate (RefreshSingleFlight): prepare under lock, join outside.
+        var previousScanInterrupted = false
+        refreshSingleFlight.run(
+            scope = scope,
+            context = ioDispatcher,
+            prepareUnderLock = {
+                // Capture the marker left by the previous run before marking this new refresh active.
+                // Recovery must never treat the marker for the refresh being started as evidence that the
+                // previous refresh was interrupted.
+                previousScanInterrupted = MoneroConfig.scanInterrupted(appContext)
+                refreshCancelRequested.set(false)
+                check(refreshInProgress.compareAndSet(false, true)) {
+                    "refreshInProgress must be false when starting a new refresh"
+                }
+                val initialTargetHeight = probedDaemonHeight?.takeIf { it > 0L }
+                if (initialTargetHeight != null) {
+                    Log.i(
+                        "WalletManager",
+                        "Refresh preflight target height seeded from OkHttp probe: $initialTargetHeight"
+                    )
+                }
 
-            // Capture the marker left by the previous run before marking this new refresh active.
-            // Recovery must never treat the marker for the refresh being started as evidence that the
-            // previous refresh was interrupted.
-            val previousScanInterrupted = MoneroConfig.scanInterrupted(appContext)
-            refreshCancelRequested.set(false)
-            check(refreshInProgress.compareAndSet(false, true)) {
-                "refreshInProgress must be false when starting a new refresh"
-            }
-            val initialTargetHeight = probedDaemonHeight?.takeIf { it > 0L }
-            if (initialTargetHeight != null) {
-                Log.i(
-                    "WalletManager",
-                    "Refresh preflight target height seeded from OkHttp probe: $initialTargetHeight"
+                _state.value = _state.value.copy(
+                    refreshInProgress = true,
+                    refreshStartedAtMs = System.currentTimeMillis(),
+                    refreshLastProgressAtMs = null,
+                    lastError = null,
+                    syncStalled = false,
+                    refreshTargetHeight = initialTargetHeight,
+                    gapLimit = gapLimit,
+                    accountGap = accountGap,
                 )
-            }
-
-            _state.value = _state.value.copy(
-                refreshInProgress = true,
-                refreshStartedAtMs = System.currentTimeMillis(),
-                refreshLastProgressAtMs = null,
-                lastError = null,
-                syncStalled = false,
-                refreshTargetHeight = initialTargetHeight,
-                gapLimit = gapLimit,
-                accountGap = accountGap,
-            )
-            MoneroConfig.setScanInterrupted(appContext, true)
-            startSyncForegroundService()
-
-            val job = scope.launch(ioDispatcher) {
+                MoneroConfig.setScanInterrupted(appContext, true)
+                startSyncForegroundService()
+            },
+            onStarted = { job ->
+                refreshJob = job
+            },
+        ) {
             try {
                 maybeRewindInterruptedScan(walletId, previousScanInterrupted)
                 withContext(ioDispatcher) {
@@ -978,12 +978,7 @@ class WalletManager(
                     stopSyncForegroundService()
                 }
             }
-            }
-
-            refreshJob = job
-            job
         }
-        jobToAwait.join()
 
         return _state.value.syncStatus ?: withContext(ioDispatcher) { WalletCore.syncStatus(walletId) }
     }
