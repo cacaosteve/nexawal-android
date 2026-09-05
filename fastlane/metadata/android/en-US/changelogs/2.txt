@@ -1,0 +1,3 @@
+Improves refresh recovery, transaction history stability, reorg handling, exact fee and timestamp reporting, and Monero payment URI validation.
+
+WalletCore is pinned and rebuilt from source for F-Droid and Wallet Scrutiny.

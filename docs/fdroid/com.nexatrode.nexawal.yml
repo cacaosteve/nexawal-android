@@ -46,6 +46,27 @@ Builds:
     ndk: 27.1.12297006
     output: app/build/outputs/apk/release/app-release-unsigned.apk
 
+  - versionName: 1.0.1
+    versionCode: 2
+    commit: v1.0.1
+    submodules: true
+    sudo:
+      - apt-get update || apt-get update
+      - apt-get install -y build-essential protobuf-compiler
+    init: git submodule update --init --recursive
+    gradle:
+      - yes
+    rm:
+      - app/release
+    build:
+      - export CARGO_FEATURES=compile-time-generators
+      - export ABIS=arm64-v8a,x86_64
+      - export ANDROID_API=26
+      - export ANDROID_NDK_HOME=$$NDK
+      - ./gradlew :app:assembleRelease --no-daemon
+    ndk: 27.1.12297006
+    output: app/build/outputs/apk/release/app-release-unsigned.apk
+
 # Default remote node + optional fiat HTTP when enabled.
 AntiFeatures:
   - NonFreeNet
@@ -54,10 +75,10 @@ MaintainerNotes: |
   Native Monero core is rebuilt from the MoneroWalletCoreFFI submodule by the
   default Gradle path (do not package committed .so files).
   See docs/FDROID.md and docs/REPRODUCIBLE_BUILD.md in the app repo.
-  minSdk is 34.
+  minSdk is 33.
 
 ArchivePolicy: 2 versions
 AutoUpdateMode: Version
 UpdateCheckMode: Tags
-CurrentVersion: 1.0.0
-CurrentVersionCode: 1
+CurrentVersion: 1.0.1
+CurrentVersionCode: 2

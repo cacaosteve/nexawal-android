@@ -3,6 +3,20 @@
 All notable changes to **NexaWal Android** are documented here.
 Release tags use `v<versionName>` (e.g. `v1.0.0`).
 
+## [1.0.1] — 2026-09-04
+
+Correctness and recovery update for the first public release.
+
+### Fixed
+- Preserve wallet history and balance across interrupted or failed refreshes
+- Join an in-flight refresh instead of starting a competing refresh job
+- Reject ambiguous or over-precision Monero URI amounts
+- Update WalletCore for reorg recovery, cache identity checks, exact fees, and timestamps
+
+### Build / FOSS
+- Pin the WalletCore source submodule to the audited 0.1.7 release revision
+- Keep the default F-Droid / Wallet Scrutiny path rebuilding native code from source
+
 ## [1.0.0] — 2026-08-12
 
 First public packaging cut for Play / F-Droid / Wallet Scrutiny.
