@@ -34,7 +34,7 @@ jobs:
     timeout-minutes: 180
     steps:
       - name: Checkout (with submodule)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           submodules: recursive
 
@@ -47,13 +47,13 @@ jobs:
           echo "ffi=$(git -C MoneroWalletCoreFFI rev-parse HEAD)"
 
       - name: Set up JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: "17"
 
       - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@v4
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
@@ -68,7 +68,7 @@ jobs:
           link-to-sdk: true
 
       - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@v6
 
       - name: Assemble release (rebuild .so from source)
         env:
@@ -100,7 +100,7 @@ jobs:
           } | tee native-android-SHA256SUMS.txt
 
       - name: Upload APK + .so + checksums
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: from-source-android-${{ steps.pins.outputs.app_commit }}
           path: |
