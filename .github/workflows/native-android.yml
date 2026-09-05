@@ -9,12 +9,14 @@ on:
   push:
     branches: [main]
     paths:
+      - "MoneroWalletCoreFFI"
       - "MoneroWalletCoreFFI/**"
       - "walletcore/build.gradle.kts"
       - ".github/workflows/native-android.yml"
       - "docs/REPRODUCIBLE_BUILD.md"
   pull_request:
     paths:
+      - "MoneroWalletCoreFFI"
       - "MoneroWalletCoreFFI/**"
       - "walletcore/build.gradle.kts"
       - ".github/workflows/native-android.yml"
